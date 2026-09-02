@@ -9,7 +9,7 @@ use adapter::wsl2_bridge::Wsl2BridgeAdapter;
 use adapter::StreamAdapter;
 use agent_deck_core::AgentState;
 use eframe::egui;
-use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke, Vec2};
+use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
 use hub::{ActiveSession, SessionHub};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -164,10 +164,9 @@ impl AgentDeckApp {
         painter.circle_filled(led_center, 4.2, glow_rgba);
         painter.circle_filled(led_center, 1.8, Color32::WHITE);
 
-        // 2. Line 1: Header / Badges
+        // 2. Line 1: Header / Badges (Reactive positioning based on width)
         let header_y = row_rect.min.y + 6.0;
 
-        // Session / tmux tag
         let badge_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
             if let Some(ref tmux_w) = session.metadata.tmux_window {
                 format!("[tmux:{}:{}]", tmux_s, tmux_w)
@@ -178,33 +177,39 @@ impl AgentDeckApp {
             format!("[{}]", session.display_name)
         };
 
+        let badge_len_approx = badge_text.len() as f32 * 6.2;
+        let badge_x = row_rect.min.x + 22.0;
+
         painter.text(
-            pos2(row_rect.min.x + 22.0, header_y),
+            pos2(badge_x, header_y),
             egui::Align2::LEFT_TOP,
             badge_text,
             FontId::monospace(9.5),
             Color32::from_rgb(0, 220, 200),
         );
 
-        // State pill
-        painter.text(
-            pos2(row_rect.min.x + 190.0, header_y),
-            egui::Align2::LEFT_TOP,
-            state_label.to_uppercase(),
-            FontId::monospace(9.0),
-            main_glow_color,
-        );
+        // State pill placed reactively after badge
+        let state_x = (badge_x + badge_len_approx + 12.0).min(row_rect.max.x - 170.0);
+        if state_x > badge_x + 30.0 {
+            painter.text(
+                pos2(state_x, header_y),
+                egui::Align2::LEFT_TOP,
+                state_label.to_uppercase(),
+                FontId::monospace(9.0),
+                main_glow_color,
+            );
+        }
 
-        // Step Count
+        // Step Count (anchored to right)
         painter.text(
-            pos2(row_rect.max.x - 70.0, header_y),
+            pos2(row_rect.max.x - 68.0, header_y),
             egui::Align2::RIGHT_TOP,
             format!("STEP: #{:03}", session.step_count),
             FontId::monospace(8.5),
             Color32::from_rgb(60, 160, 90),
         );
 
-        // 3. Line 2: 1-Line Status Marquee Ticker
+        // 3. Line 2: 1-Line Status Marquee Ticker (Reactive width)
         let marquee_y = row_rect.min.y + 24.0;
         let marquee_area = Rect::from_min_max(
             pos2(row_rect.min.x + 8.0, marquee_y),
@@ -232,7 +237,7 @@ impl AgentDeckApp {
         row_painter.text(pos2(start_x + total_text_width + 40.0, marquee_y), egui::Align2::LEFT_TOP, &display_text, font, text_color);
         row_painter.set_clip_rect(prev_clip);
 
-        // 4. Mini VU Meter on Right
+        // 4. Mini VU Meter on Right (anchored to right edge)
         let vu_box_min = pos2(row_rect.max.x - 58.0, row_rect.min.y + 12.0);
         let num_bars = 6;
         let bar_w = 5.0;
@@ -400,13 +405,15 @@ impl eframe::App for AgentDeckApp {
             ui.add_space(4.0);
 
             if !self.is_compact_mode {
-                // Render N Thick Session Rows inside ScrollArea for the selected Tab
+                // Reactive ScrollArea: Automatically fills remaining window height!
                 let current_tab = self.hub.selected_tab_idx;
                 let dt = dt;
                 let pulse_phase = self.pulse_phase;
 
+                let available_h = (ui.available_height() - 22.0).max(50.0);
+
                 egui::ScrollArea::vertical()
-                    .max_height(145.0)
+                    .max_height(available_h)
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         let mut matching_indices: Vec<usize> = Vec::new();
@@ -418,7 +425,7 @@ impl eframe::App for AgentDeckApp {
                         }
 
                         if matching_indices.is_empty() {
-                            ui.add_space(10.0);
+                            ui.add_space(15.0);
                             ui.vertical_centered(|ui| {
                                 ui.colored_label(
                                     Color32::from_rgb(110, 130, 145),
@@ -435,9 +442,9 @@ impl eframe::App for AgentDeckApp {
                         }
                     });
 
-                ui.add_space(3.0);
+                ui.add_space(2.0);
 
-                // Bottom Global Status Bar
+                // Bottom Global Status Bar + Tactile Resize Corner Grip
                 let total_sessions = self.hub.sessions.len();
                 let total_waiting = self.hub.sessions.iter().filter(|s| matches!(s.state, AgentState::WaitingForInput { .. })).count();
 
@@ -458,9 +465,27 @@ impl eframe::App for AgentDeckApp {
                     ui.colored_label(msg_color, egui::RichText::new(status_msg).monospace().size(8.5));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Tactile Resize Handle in Bottom Right
+                        let (resize_id, resize_rect) = ui.allocate_space(vec2(12.0, 12.0));
+                        let resize_resp = ui.interact(resize_rect, resize_id, egui::Sense::drag());
+                        
+                        let grip_color = if resize_resp.hovered() || resize_resp.dragged() {
+                            Color32::from_rgb(0, 220, 160)
+                        } else {
+                            Color32::from_rgb(60, 75, 90)
+                        };
+
+                        let p = ui.painter();
+                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 8.0), pos2(resize_rect.max.x - 8.0, resize_rect.max.y - 2.0)], Stroke::new(1.0, grip_color));
+                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 4.0), pos2(resize_rect.max.x - 4.0, resize_rect.max.y - 2.0)], Stroke::new(1.0, grip_color));
+
+                        if resize_resp.dragged() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast));
+                        }
+
                         ui.colored_label(
                             Color32::from_rgb(50, 75, 60),
-                            egui::RichText::new("[CLICK ROW TO HIGHLIGHT | DRAG DECK]").monospace().size(8.0),
+                            egui::RichText::new("[CLICK ROW TO HIGHLIGHT | DRAG CORNER TO RESIZE]").monospace().size(8.0),
                         );
                     });
                 });
@@ -472,9 +497,9 @@ impl eframe::App for AgentDeckApp {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 230.0])
-            .with_min_inner_size([440.0, 80.0])
-            .with_max_inner_size([900.0, 500.0])
+            .with_inner_size([560.0, 240.0])
+            .with_min_inner_size([440.0, 130.0]) // Safe minimum size to prevent edge cases
+            .with_max_inner_size([1200.0, 800.0])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
