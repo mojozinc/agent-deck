@@ -1,4 +1,4 @@
-﻿#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
@@ -36,7 +36,7 @@ impl AgentDeckApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let mut hub = SessionHub::new();
-        let sim_enabled = Arc::new(AtomicBool::new(true));
+        let sim_enabled = Arc::new(AtomicBool::new(false));
 
         // 1. In-Process Native Windows Watcher
         let mut native_adapter = NativeWindowsAdapter::new();
