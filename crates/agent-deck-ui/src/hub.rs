@@ -1,4 +1,4 @@
-﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -159,7 +159,7 @@ impl SessionHub {
         let (tx, rx) = channel::<SessionEvent>();
 
         Self {
-            sessions: Vec::new>,
+            sessions: Vec::new(),
             rx,
             tx,
             selected_tab_idx: 0,

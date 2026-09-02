@@ -1,4 +1,4 @@
-﻿#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
@@ -35,7 +35,7 @@ impl AgentDeckApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let custom_titles = Arc::new(RwLock::new(CustomTitlesStorage::load()));
-        let mut hub = SessionHub::new(custom_titles);
+        let hub = SessionHub::new(custom_titles);
 
         // 1. In-Process Native Windows Watcher (monitors all active Windows sessions)
         let mut native_adapter = NativeWindowsAdapter::new();
@@ -175,12 +175,16 @@ impl AgentDeckApp {
 
         let badge_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
             if let Some(ref tmux_w) = session.metadata.tmux_window {
-                format!("tmux:{}:{}", tmux_s, tmux_w)
+                format!("{} • tmux:{}:{}", session.agent_type, tmux_s, tmux_w)
             } else {
-                format!("tmux:{}", tmux_s)
+                format!("{} • tmux:{}", session.agent_type, tmux_s)
             }
         } else {
-            session.display_name.clone()
+            if session.display_name.starts_with(&session.agent_type) {
+                session.display_name.clone()
+            } else {
+                format!("{} • {}", session.agent_type, session.display_name)
+            }
         };
 
         let badge_len_approx = badge_text.len() as f32 * 6.2;
@@ -303,7 +307,7 @@ impl AgentDeckApp {
             let edit_y = row_rect.min.y + 44.0;
             let edit_ui_rect = Rect::from_min_size(pos2(row_rect.min.x + 8.0, edit_y), vec2(row_rect.width() - 16.0, 20.0));
             
-            ui.allocate_ui_at_rect(edit_ui_rect, |ui| {
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(edit_ui_rect), |ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(Color32::from_rgb(0, 220, 200), egui::RichText::new("Name:").size(9.0));
                     
