@@ -1,4 +1,6 @@
-﻿use eframe::egui;
+#![windows_subsystem = "windows"]
+
+use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
 use serde_json::Value;
 use std::fs::File;
@@ -72,34 +74,43 @@ impl AgentDeckApp {
 
         let channels = vec![
             ChannelSession {
-                name: "AGY (Native Live)".to_string(),
-                agent_type: "AGY".to_string(),
+                name: "AGY (Win Native)".to_string(),
+                agent_type: "AGY-WIN".to_string(),
                 state: AgentState::Idle,
-                status_text: "SCANNING ANTIGRAVITY BRAIN...".to_string(),
+                status_text: "SCANNING NATIVE ANTIGRAVITY BRAIN...".to_string(),
                 step_count: 0,
                 last_updated: Instant::now(),
                 is_live: true,
             },
             ChannelSession {
-                name: "Claude Code".to_string(),
-                agent_type: "Claude".to_string(),
-                state: AgentState::RunningTool {
-                    name: "grep_search".to_string(),
-                    summary: "Searching AST parser rules".to_string(),
+                name: "AGY (WSL2 Ubuntu)".to_string(),
+                agent_type: "AGY-WSL".to_string(),
+                state: AgentState::WaitingForInput {
+                    prompt_preview: "Proceed with running database migrations? [Y/n]".to_string(),
                 },
-                status_text: "GREP: Searching AST parser rules across 142 files...".to_string(),
-                step_count: 18,
+                status_text: "INPUT REQUIRED: Confirm running migrations on postgres-dev [Y/n]".to_string(),
+                step_count: 34,
                 last_updated: Instant::now(),
                 is_live: false,
             },
             ChannelSession {
-                name: "Codex CLI".to_string(),
-                agent_type: "Codex".to_string(),
-                state: AgentState::WaitingForInput {
-                    prompt_preview: "Proceed with deleting temp migrations? [Y/n]".to_string(),
+                name: "AGY (WSL2 Worker)".to_string(),
+                agent_type: "AGY-WSL".to_string(),
+                state: AgentState::RunningTool {
+                    name: "cargo_test".to_string(),
+                    summary: "Running integration suite".to_string(),
                 },
-                status_text: "WAITING FOR INPUT: Confirm file overwrite [Y/n]".to_string(),
-                step_count: 42,
+                status_text: "TEST: cargo test --test api_gateway [18/22 passed]".to_string(),
+                step_count: 51,
+                last_updated: Instant::now(),
+                is_live: false,
+            },
+            ChannelSession {
+                name: "Claude (WSL2)".to_string(),
+                agent_type: "CLAUDE-WSL".to_string(),
+                state: AgentState::Thinking,
+                status_text: "THINKING: Synthesizing AST refactor plan for websocket_server.rs".to_string(),
+                step_count: 12,
                 last_updated: Instant::now(),
                 is_live: false,
             },
@@ -107,12 +118,12 @@ impl AgentDeckApp {
 
         Self {
             channels,
-            active_channel_idx: 0,
+            active_channel_idx: 1, // Start on WSL2 session
             marquee_offset: 0.0,
             last_frame_time: Instant::now(),
             vu_levels: [0.0; 16],
             pulse_phase: 0.0,
-            is_mock_mode: false,
+            is_mock_mode: true, // Default simulation active for immediate testing
             mock_timer: Instant::now(),
             mock_scenario_idx: 0,
             rx_live_updates: Some(rx),
@@ -125,58 +136,131 @@ impl AgentDeckApp {
             return;
         }
 
-        if self.mock_timer.elapsed() > Duration::from_millis(3500) {
+        if self.mock_timer.elapsed() > Duration::from_millis(3200) {
             self.mock_timer = Instant::now();
-            self.mock_scenario_idx = (self.mock_scenario_idx + 1) % 5;
+            self.mock_scenario_idx = (self.mock_scenario_idx + 1) % 6;
 
-            // Update Channel 2 (Claude) and 3 (Codex) mock states
             match self.mock_scenario_idx {
                 0 => {
-                    self.channels[1].state = AgentState::Thinking;
-                    self.channels[1].status_text = "THINKING: Analyzing call hierarchy for auth_middleware.rs".to_string();
+                    // Channel 1: AGY (WSL2 Ubuntu) -> Waiting for input
+                    self.channels[1].state = AgentState::WaitingForInput {
+                        prompt_preview: "Proceed with running database migrations? [Y/n]".to_string(),
+                    };
+                    self.channels[1].status_text = "INPUT REQUIRED: Confirm running migrations on postgres-dev [Y/n]".to_string();
+                    self.channels[1].step_count += 1;
+
+                    // Channel 2: AGY (WSL2 Worker) -> Running Tool
                     self.channels[2].state = AgentState::RunningTool {
                         name: "cargo_test".to_string(),
-                        summary: "Running integration tests".to_string(),
+                        summary: "Running integration suite".to_string(),
                     };
-                    self.channels[2].status_text = "TEST: Running cargo test --workspace [14/18 passed]".to_string();
+                    self.channels[2].status_text = "TEST: cargo test --test api_gateway [18/22 passed]".to_string();
+                    self.channels[2].step_count += 1;
+
+                    // Channel 3: Claude WSL2 -> Thinking
+                    self.channels[3].state = AgentState::Thinking;
+                    self.channels[3].status_text = "THINKING: Synthesizing AST refactor plan for websocket_server.rs".to_string();
+                    self.channels[3].step_count += 1;
                 }
                 1 => {
-                    self.channels[1].state = AgentState::RunningTool {
-                        name: "replace_file_content".to_string(),
-                        summary: "Patching JWT validation logic".to_string(),
-                    };
-                    self.channels[1].status_text = "EDIT: Patching JWT validation token TTL in session.rs".to_string();
+                    // Channel 1: Thinking
+                    self.channels[1].state = AgentState::Thinking;
+                    self.channels[1].status_text = "THINKING: Evaluating schema changes against user_service models".to_string();
+                    self.channels[1].step_count += 1;
+
+                    // Channel 2: Waiting for input
                     self.channels[2].state = AgentState::WaitingForInput {
-                        prompt_preview: "Allow execution of bash script? [y/N]".to_string(),
+                        prompt_preview: "Allow execution of bash script `deploy.sh`? [y/N]".to_string(),
                     };
-                    self.channels[2].status_text = "INPUT REQUIRED: Shell command permission pending".to_string();
+                    self.channels[2].status_text = "PERMISSION REQUIRED: Execute bash script `scripts/deploy.sh` [y/N]".to_string();
+                    self.channels[2].step_count += 1;
+
+                    // Channel 3: Tool Execution
+                    self.channels[3].state = AgentState::RunningTool {
+                        name: "replace_file_content".to_string(),
+                        summary: "Patching connection pool TTL".to_string(),
+                    };
+                    self.channels[3].status_text = "EDIT: Patching connection pool TTL in db/pool.rs (line 88)".to_string();
+                    self.channels[3].step_count += 1;
                 }
                 2 => {
-                    self.channels[1].state = AgentState::WaitingForInput {
-                        prompt_preview: "Which database backend would you prefer?".to_string(),
+                    // Channel 1: Tool Execution
+                    self.channels[1].state = AgentState::RunningTool {
+                        name: "run_command".to_string(),
+                        summary: "Executing diesel migration run".to_string(),
                     };
-                    self.channels[1].status_text = "INPUT REQUIRED: Select SQLite or PostgreSQL database".to_string();
-                    self.channels[2].state = AgentState::Thinking;
-                    self.channels[2].status_text = "THINKING: Synthesizing benchmark report...".to_string();
-                }
-                3 => {
-                    self.channels[1].state = AgentState::Finished;
-                    self.channels[1].status_text = "ALL TASKS COMPLETED: Branch ready for commit".to_string();
+                    self.channels[1].status_text = "RUNNING: diesel migration run --database-url=localhost:5432".to_string();
+                    self.channels[1].step_count += 1;
+
+                    // Channel 2: Tool Execution
                     self.channels[2].state = AgentState::RunningTool {
                         name: "docker_build".to_string(),
-                        summary: "Building container image".to_string(),
+                        summary: "Building release container".to_string(),
                     };
-                    self.channels[2].status_text = "DOCKER: Building target release image [layer 6/9]".to_string();
+                    self.channels[2].status_text = "DOCKER: Building container image registry.local/app:v1.4 [layer 7/11]".to_string();
+                    self.channels[2].step_count += 1;
+
+                    // Channel 3: Waiting for input
+                    self.channels[3].state = AgentState::WaitingForInput {
+                        prompt_preview: "Would you like to instrument OpenTelemetry metrics?".to_string(),
+                    };
+                    self.channels[3].status_text = "QUESTION: Should we instrument OpenTelemetry trace exporters?".to_string();
+                    self.channels[3].step_count += 1;
                 }
-                _ => {
+                3 => {
+                    // Channel 1: Error / Interrupted
+                    self.channels[1].state = AgentState::Error {
+                        message: "Connection refused on port 5432".to_string(),
+                    };
+                    self.channels[1].status_text = "ERROR: Failed to connect to postgres on port 5432 (Connection refused)".to_string();
+
+                    // Channel 2: Thinking
+                    self.channels[2].state = AgentState::Thinking;
+                    self.channels[2].status_text = "THINKING: Optimizing multi-stage Dockerfile cache layers...".to_string();
+                    self.channels[2].step_count += 1;
+
+                    // Channel 3: Finished
+                    self.channels[3].state = AgentState::Finished;
+                    self.channels[3].status_text = "TASK COMPLETED: Auth service refactoring finished. Ready for PR.".to_string();
+                }
+                4 => {
+                    // Channel 1: Running tool
                     self.channels[1].state = AgentState::RunningTool {
                         name: "view_file".to_string(),
-                        summary: "Reading config.toml".to_string(),
+                        summary: "Inspecting docker-compose.yml".to_string(),
                     };
-                    self.channels[1].status_text = "READING: Inspecting environment overrides in config.toml".to_string();
-                    self.channels[2].state = AgentState::Idle;
-                    self.channels[2].status_text = "CODEX IDLE: Listening for next prompt...".to_string();
+                    self.channels[1].status_text = "READING: Checking postgres container healthcheck in docker-compose.yml".to_string();
+                    self.channels[1].step_count += 1;
+
+                    // Channel 2: Finished
+                    self.channels[2].state = AgentState::Finished;
+                    self.channels[2].status_text = "BUILD SUCCESSFUL: Container image tagged & pushed (digest: 8b29f4)".to_string();
+
+                    // Channel 3: Idle
+                    self.channels[3].state = AgentState::Idle;
+                    self.channels[3].status_text = "CLAUDE IDLE: Session active in WSL2 ~/workbench/microservices".to_string();
                 }
+                _ => {
+                    // Channel 1: Finished
+                    self.channels[1].state = AgentState::Finished;
+                    self.channels[1].status_text = "ALL MIGRATIONS APPLIED: Schema version is up to date (004_add_users)".to_string();
+
+                    // Channel 2: Idle
+                    self.channels[2].state = AgentState::Idle;
+                    self.channels[2].status_text = "AGY WORKER IDLE: Listening for next instruction...".to_string();
+
+                    // Channel 3: Running tool
+                    self.channels[3].state = AgentState::RunningTool {
+                        name: "grep_search".to_string(),
+                        summary: "Searching deprecated handlers".to_string(),
+                    };
+                    self.channels[3].status_text = "GREP: Searching for legacy `.unwrap()` calls in crate core...".to_string();
+                    self.channels[3].step_count += 1;
+                }
+            }
+
+            for ch in self.channels.iter_mut().skip(1) {
+                ch.last_updated = Instant::now();
             }
         }
     }
@@ -595,8 +679,8 @@ fn watch_native_agy_sessions(tx: std::sync::mpsc::Sender<LiveUpdate>) {
                                 };
 
                                 let _ = tx.send(LiveUpdate {
-                                    channel_name: "AGY (Native Live)".to_string(),
-                                    agent_type: "AGY".to_string(),
+                                    channel_name: "AGY (Win Native)".to_string(),
+                                    agent_type: "AGY-WIN".to_string(),
                                     state,
                                     status_text,
                                     step_count: step_index,
@@ -613,9 +697,9 @@ fn watch_native_agy_sessions(tx: std::sync::mpsc::Sender<LiveUpdate>) {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 115.0])
-            .with_min_inner_size([380.0, 75.0])
-            .with_max_inner_size([700.0, 160.0])
+            .with_inner_size([540.0, 115.0])
+            .with_min_inner_size([400.0, 75.0])
+            .with_max_inner_size([850.0, 160.0])
             .with_decorations(false) // Frameless retro floating look
             .with_transparent(true)
             .with_always_on_top() // Floating overlay
@@ -630,4 +714,3 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(AgentDeckApp::new(cc)))),
     )
 }
-
