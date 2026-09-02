@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+﻿#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
@@ -10,7 +10,7 @@ use adapter::StreamAdapter;
 use agent_deck_core::AgentState;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
-use hub::{ActiveSession, SessionHub};
+use hub::{ActiveSession, SessionHub, DEFAULT_TABS};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ impl AgentDeckApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let mut hub = SessionHub::new();
-        let sim_enabled = Arc::new(AtomicBool::new(false));
+        let sim_enabled = Arc::new(AtomicBool::new(false)); // Default SIM OFF
 
         // 1. In-Process Native Windows Watcher
         let mut native_adapter = NativeWindowsAdapter::new();
@@ -81,7 +81,7 @@ impl AgentDeckApp {
                 let pulse = if should_blink {
                     (pulse_phase * 2.5).sin().abs() * 0.8
                 } else {
-                    0.5 // Steady warm glow when acknowledged
+                    0.5
                 };
                 *bar = lerp(*bar, pulse, dt * 8.0);
             } else {
@@ -101,7 +101,7 @@ impl AgentDeckApp {
         let response = ui.interact(row_rect, ui.id().with(&session.session_id), egui::Sense::click());
         if response.clicked() {
             self.selected_session_id = Some(session.session_id.clone());
-            session.attention.acknowledge(); // Acknowledge alert on row click!
+            session.attention.acknowledge();
         }
 
         let painter = ui.painter_at(row_rect);
@@ -118,7 +118,6 @@ impl AgentDeckApp {
         let stroke_color = if is_selected {
             Color32::from_rgb(0, 220, 140)
         } else if should_blink {
-            // Unacknowledged: actively blink
             let blink = (pulse_phase * 2.5).sin() > 0.0;
             if blink {
                 Color32::from_rgb(255, 190, 20)
@@ -126,7 +125,6 @@ impl AgentDeckApp {
                 Color32::from_rgb(110, 80, 10)
             }
         } else if is_waiting {
-            // Acknowledged: solid steady amber
             Color32::from_rgb(180, 140, 20)
         } else if response.hovered() {
             Color32::from_rgb(45, 75, 55)
@@ -160,7 +158,7 @@ impl AgentDeckApp {
         let pulse_intensity = if should_blink {
             ((pulse_phase * 3.2).sin() * 0.4 + 0.6).clamp(0.1, 1.0)
         } else if is_waiting {
-            0.85 // Solid steady amber when acked
+            0.85
         } else if is_active {
             ((pulse_phase * 2.2).sin() * 0.25 + 0.75).clamp(0.2, 1.0)
         } else {
@@ -176,7 +174,7 @@ impl AgentDeckApp {
         painter.circle_filled(led_center, 4.2, glow_rgba);
         painter.circle_filled(led_center, 1.8, Color32::WHITE);
 
-        // 2. Line 1: Clean Metadata & Badges (No noisy brackets)
+        // 2. Line 1: Clean Metadata & Badges
         let header_y = row_rect.min.y + 6.0;
 
         let badge_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
@@ -200,7 +198,6 @@ impl AgentDeckApp {
             Color32::from_rgb(0, 220, 200),
         );
 
-        // State pill placed reactively after badge
         let state_x = (badge_x + badge_len_approx + 14.0).min(row_rect.max.x - 160.0);
         if state_x > badge_x + 30.0 {
             painter.text(
@@ -212,7 +209,6 @@ impl AgentDeckApp {
             );
         }
 
-        // Step Count (anchored to right)
         painter.text(
             pos2(row_rect.max.x - 68.0, header_y),
             egui::Align2::RIGHT_TOP,
@@ -221,7 +217,7 @@ impl AgentDeckApp {
             Color32::from_rgb(60, 160, 90),
         );
 
-        // 3. Line 2: 1-Line Status Marquee Ticker (Clean text without brackets)
+        // 3. Line 2: Status Marquee Ticker
         let marquee_y = row_rect.min.y + 24.0;
         let marquee_area = Rect::from_min_max(
             pos2(row_rect.min.x + 8.0, marquee_y),
@@ -249,7 +245,7 @@ impl AgentDeckApp {
         row_painter.text(pos2(start_x + total_text_width + 40.0, marquee_y), egui::Align2::LEFT_TOP, &display_text, font, text_color);
         row_painter.set_clip_rect(prev_clip);
 
-        // 4. Mini VU Meter on Right (anchored to right edge)
+        // 4. Mini VU Meter on Right
         let vu_box_min = pos2(row_rect.max.x - 58.0, row_rect.min.y + 12.0);
         let num_bars = 6;
         let bar_w = 5.0;
@@ -266,11 +262,11 @@ impl AgentDeckApp {
                 let seg_rect = Rect::from_min_size(pos2(x, seg_y), vec2(bar_w, 2.5));
                 let seg_color = if seg < active_segments {
                     if seg >= 4 {
-                        Color32::from_rgb(255, 80, 80) // Red Peak
+                        Color32::from_rgb(255, 80, 80)
                     } else if seg >= 3 {
-                        Color32::from_rgb(255, 200, 30) // Amber Mid
+                        Color32::from_rgb(255, 200, 30)
                     } else {
-                        Color32::from_rgb(0, 255, 100) // Green
+                        Color32::from_rgb(0, 255, 100)
                     }
                 } else {
                     Color32::from_rgb(14, 24, 18)
@@ -342,107 +338,70 @@ impl eframe::App for AgentDeckApp {
 
             ui.add_space(3.0);
 
-            // Group Sessions by Environment Tab
-            let win_sessions_count = self.hub.windows_sessions().len();
-            let wsl_sessions_count = self.hub.wsl2_sessions().len();
-
-            let win_unacked = SessionHub::has_unacknowledged_input(&self.hub.windows_sessions());
-            let win_waiting = SessionHub::has_waiting_input(&self.hub.windows_sessions());
-
-            let wsl_unacked = SessionHub::has_unacknowledged_input(&self.hub.wsl2_sessions());
-            let wsl_waiting = SessionHub::has_waiting_input(&self.hub.wsl2_sessions());
-
-            // Clean Environment Tabs
+            // Config-Driven Environment Tabs Rendering (Common generic loop)
             ui.horizontal(|ui| {
-                // Tab 0: Windows
-                let tab0_active = self.hub.selected_tab_idx == 0;
-                let tab0_bg = if tab0_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
-                
-                let tab0_border = if win_unacked {
-                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
-                    if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
-                } else if win_waiting {
-                    Color32::from_rgb(180, 140, 20) // Solid amber when acked
-                } else if tab0_active {
-                    Color32::from_rgb(0, 220, 160)
-                } else {
-                    Color32::from_rgb(45, 52, 64)
-                };
+                for (tab_idx, tab_cfg) in DEFAULT_TABS.iter().enumerate() {
+                    let matching_sessions = self.hub.sessions_matching(tab_cfg.filter);
+                    let count = matching_sessions.len();
+                    let is_unacked = SessionHub::has_unacknowledged_input(&matching_sessions);
+                    let is_waiting = SessionHub::has_waiting_input(&matching_sessions);
+                    let is_active = self.hub.selected_tab_idx == tab_idx;
 
-                let tab0_dot = if win_unacked {
-                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
-                    if blink { "●" } else { "○" }
-                } else if win_waiting {
-                    "●"
-                } else {
-                    "○"
-                };
+                    let tab_bg = if is_active {
+                        Color32::from_rgb(42, 52, 68)
+                    } else {
+                        Color32::from_rgb(24, 27, 34)
+                    };
 
-                let tab0_label = format!("{} Windows • {}", tab0_dot, win_sessions_count);
+                    let tab_border = if is_unacked {
+                        let blink = (self.pulse_phase * 2.5).sin() > 0.0;
+                        if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
+                    } else if is_waiting {
+                        Color32::from_rgb(180, 140, 20)
+                    } else if is_active {
+                        Color32::from_rgb(0, 220, 160)
+                    } else {
+                        Color32::from_rgb(45, 52, 64)
+                    };
 
-                let btn0 = egui::Button::new(
-                    egui::RichText::new(tab0_label)
-                        .size(10.0)
-                        .color(if tab0_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
-                )
-                .fill(tab0_bg)
-                .stroke(Stroke::new(1.0_f32, tab0_border))
-                .rounding(Rounding::same(3.0));
+                    let dot = if is_unacked {
+                        let blink = (self.pulse_phase * 2.5).sin() > 0.0;
+                        if blink { "●" } else { "○" }
+                    } else if is_waiting {
+                        "●"
+                    } else {
+                        "○"
+                    };
 
-                if ui.add(btn0).clicked() {
-                    self.hub.selected_tab_idx = 0;
-                    self.hub.acknowledge_tab(0); // Acknowledge all in tab on click!
-                }
+                    let tab_label = format!("{} {} • {}", dot, tab_cfg.label, count);
 
-                // Tab 1: WSL2
-                let tab1_active = self.hub.selected_tab_idx == 1;
-                let tab1_bg = if tab1_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
+                    let btn = egui::Button::new(
+                        egui::RichText::new(tab_label)
+                            .size(10.0)
+                            .color(if is_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
+                    )
+                    .fill(tab_bg)
+                    .stroke(Stroke::new(1.0_f32, tab_border))
+                    .rounding(Rounding::same(3.0));
 
-                let tab1_border = if wsl_unacked {
-                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
-                    if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
-                } else if wsl_waiting {
-                    Color32::from_rgb(180, 140, 20) // Solid amber when acked
-                } else if tab1_active {
-                    Color32::from_rgb(0, 220, 160)
-                } else {
-                    Color32::from_rgb(45, 52, 64)
-                };
-
-                let tab1_dot = if wsl_unacked {
-                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
-                    if blink { "●" } else { "○" }
-                } else if wsl_waiting {
-                    "●"
-                } else {
-                    "○"
-                };
-
-                let tab1_label = format!("{} WSL2 • {}", tab1_dot, wsl_sessions_count);
-
-                let btn1 = egui::Button::new(
-                    egui::RichText::new(tab1_label)
-                        .size(10.0)
-                        .color(if tab1_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
-                )
-                .fill(tab1_bg)
-                .stroke(Stroke::new(1.0_f32, tab1_border))
-                .rounding(Rounding::same(3.0));
-
-                if ui.add(btn1).clicked() {
-                    self.hub.selected_tab_idx = 1;
-                    self.hub.acknowledge_tab(1); // Acknowledge all in tab on click!
+                    if ui.add(btn).clicked() {
+                        self.hub.selected_tab_idx = tab_idx;
+                        self.hub.acknowledge_matching(tab_cfg.filter);
+                    }
                 }
             });
 
             ui.add_space(4.0);
 
             if !self.is_compact_mode {
-                // Reactive ScrollArea
-                let current_tab = self.hub.selected_tab_idx;
+                // Reactive ScrollArea driven dynamically by selected TabConfig
+                let current_tab_filter = DEFAULT_TABS
+                    .get(self.hub.selected_tab_idx)
+                    .map(|t| t.filter)
+                    .unwrap_or(DEFAULT_TABS[0].filter);
+
                 let dt = dt;
                 let pulse_phase = self.pulse_phase;
-
                 let available_h = (ui.available_height() - 22.0).max(50.0);
 
                 egui::ScrollArea::vertical()
@@ -451,8 +410,7 @@ impl eframe::App for AgentDeckApp {
                     .show(ui, |ui| {
                         let mut matching_indices: Vec<usize> = Vec::new();
                         for (idx, s) in self.hub.sessions.iter().enumerate() {
-                            let is_win = s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-");
-                            if (current_tab == 0 && is_win) || (current_tab == 1 && !is_win) {
+                            if current_tab_filter(s) {
                                 matching_indices.push(idx);
                             }
                         }

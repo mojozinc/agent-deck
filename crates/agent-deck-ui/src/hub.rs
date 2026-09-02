@@ -1,6 +1,29 @@
-use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
+
+#[derive(Clone, Copy, Debug)]
+pub struct TabConfig {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub filter: fn(&ActiveSession) -> bool,
+}
+
+pub const DEFAULT_TABS: &[TabConfig] = &[
+    TabConfig {
+        id: "windows",
+        label: "Windows",
+        icon: "🪟",
+        filter: |s| s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-"),
+    },
+    TabConfig {
+        id: "wsl2",
+        label: "WSL2",
+        icon: "🐧",
+        filter: |s| !s.metadata.host.eq_ignore_ascii_case("windows") && !s.session_id.starts_with("win-"),
+    },
+];
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttentionState {
@@ -71,7 +94,7 @@ pub struct SessionHub {
     pub sessions: Vec<ActiveSession>,
     pub rx: Receiver<SessionEvent>,
     pub tx: Sender<SessionEvent>,
-    pub selected_tab_idx: usize, // 0 = Windows, 1 = WSL2
+    pub selected_tab_idx: usize,
 }
 
 impl SessionHub {
@@ -123,20 +146,9 @@ impl SessionHub {
         }
     }
 
-    /// Returns sessions running natively on Windows
-    pub fn windows_sessions(&self) -> Vec<&ActiveSession> {
-        self.sessions
-            .iter()
-            .filter(|s| s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-"))
-            .collect()
-    }
-
-    /// Returns sessions running inside WSL2
-    pub fn wsl2_sessions(&self) -> Vec<&ActiveSession> {
-        self.sessions
-            .iter()
-            .filter(|s| !s.metadata.host.eq_ignore_ascii_case("windows") && !s.session_id.starts_with("win-"))
-            .collect()
+    /// Returns sessions matching a configured tab filter
+    pub fn sessions_matching(&self, filter: fn(&ActiveSession) -> bool) -> Vec<&ActiveSession> {
+        self.sessions.iter().filter(|s| filter(s)).collect()
     }
 
     /// Checks if any session in the given list requires user input (either blinking or acknowledged)
@@ -149,18 +161,10 @@ impl SessionHub {
         sessions.iter().any(|s| s.attention.should_blink(&s.state))
     }
 
-    /// Acknowledges a single session
-    pub fn acknowledge_session(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.iter_mut().find(|s| s.session_id == session_id) {
-            session.attention.acknowledge();
-        }
-    }
-
-    /// Acknowledges all sessions in a given tab
-    pub fn acknowledge_tab(&mut self, tab_idx: usize) {
+    /// Acknowledges all sessions matching a given filter
+    pub fn acknowledge_matching(&mut self, filter: fn(&ActiveSession) -> bool) {
         for s in self.sessions.iter_mut() {
-            let is_win = s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-");
-            if (tab_idx == 0 && is_win) || (tab_idx == 1 && !is_win) {
+            if filter(s) {
                 s.attention.acknowledge();
             }
         }
