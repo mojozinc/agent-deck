@@ -17,6 +17,52 @@ impl NativeWindowsAdapter {
     }
 }
 
+fn extract_topic_from_transcript(path: &Path) -> Option<String> {
+    if let Ok(file) = File::open(path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().flatten().take(10) {
+            if let Ok(json) = serde_json::from_str::<Value>(&line) {
+                let step_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let source = json.get("source").and_then(|v| v.as_str()).unwrap_or("");
+
+                if step_type == "USER_INPUT" || source == "USER_EXPLICIT" {
+                    if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                        let text = if let Some(start) = content.find("<USER_REQUEST>") {
+                            let after = &content[start + "<USER_REQUEST>".len()..];
+                            if let Some(end) = after.find("</USER_REQUEST>") {
+                                &after[..end]
+                            } else {
+                                after
+                            }
+                        } else {
+                            content
+                        };
+
+                        let clean: String = text
+                            .lines()
+                            .map(|l| l.trim())
+                            .filter(|l| !l.is_empty() && !l.starts_with('<'))
+                            .collect::<Vec<&str>>()
+                            .join(" ");
+
+                        let trimmed = clean.trim();
+                        if !trimmed.is_empty() {
+                            let max_chars = 34;
+                            let char_count = trimmed.chars().count();
+                            let mut result: String = trimmed.chars().take(max_chars).collect();
+                            if char_count > max_chars {
+                                result.push_str("..");
+                            }
+                            return Some(result);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 impl StreamAdapter for NativeWindowsAdapter {
     fn name(&self) -> &'static str {
         "Native Windows Gemini Adapter"
@@ -28,6 +74,7 @@ impl StreamAdapter for NativeWindowsAdapter {
             let brain_dir = PathBuf::from(home_dir).join(".gemini\\antigravity-cli\\brain");
 
             let mut watched_files: HashMap<PathBuf, u64> = HashMap::new();
+            let mut session_topics: HashMap<PathBuf, String> = HashMap::new();
 
             loop {
                 thread::sleep(Duration::from_millis(400));
@@ -47,7 +94,7 @@ impl StreamAdapter for NativeWindowsAdapter {
                                 if transcript_path.exists() {
                                     if let Ok(meta) = std::fs::metadata(&transcript_path) {
                                         if let Ok(modified) = meta.modified() {
-                                            // Only consider sessions modified in the last 48 hours
+                                            // Consider active sessions from the last 48 hours
                                             if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
                                                 if elapsed < Duration::from_secs(48 * 3600) {
                                                     candidate_sessions.push((transcript_path, session_id, modified));
@@ -63,9 +110,15 @@ impl StreamAdapter for NativeWindowsAdapter {
                     // Sort candidates by most recently modified
                     candidate_sessions.sort_by(|a, b| b.2.cmp(&a.2));
 
-                    // Process ALL active / recent sessions simultaneously!
+                    // Process ALL active / recent sessions simultaneously
                     for (transcript_path, session_id, _) in candidate_sessions {
                         let last_pos = watched_files.get(&transcript_path).copied().unwrap_or(0);
+
+                        // Resolve meaningful session topic/title
+                        let topic = session_topics.entry(transcript_path.clone()).or_insert_with(|| {
+                            extract_topic_from_transcript(&transcript_path)
+                                .unwrap_or_else(|| format!("Session {}", &session_id[..6.min(session_id.len())]))
+                        });
 
                         if let Ok(mut file) = File::open(&transcript_path) {
                             let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -138,10 +191,9 @@ impl StreamAdapter for NativeWindowsAdapter {
                                             (AgentState::Thinking, format!("STEP #{}: {}", step_index, step_type))
                                         };
 
-                                        let short_id: String = session_id.chars().take(6).collect();
                                         let event = SessionEvent::new(
                                             format!("win-gemini-{}", session_id),
-                                            format!("Gemini • {}", short_id),
+                                            topic.clone(),
                                             "Gemini",
                                             state,
                                             status_text,
