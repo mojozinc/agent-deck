@@ -1,22 +1,23 @@
-﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttentionState {
-    pub is_acknowledged: bool,
+    pub is_unacknowledged: bool,
     pub last_state_signature: String,
 }
 
 impl AttentionState {
     pub fn new() -> Self {
         Self {
-            is_acknowledged: false,
+            is_unacknowledged: false, // Default false: deck starts calm without blinking on launch
             last_state_signature: String::new(),
         }
     }
 
-    /// Updates the attention tracker with a new state. If state changed, resets acknowledgment!
+    /// Updates the attention tracker with a new state.
+    /// Only triggers unacknowledged blinking when transitioning from another state into WaitingForInput.
     pub fn update(&mut self, state: &AgentState, step_count: u32) {
         let sig = match state {
             AgentState::WaitingForInput { prompt_preview } => format!("waiting:{}:{}", step_count, prompt_preview),
@@ -28,18 +29,26 @@ impl AttentionState {
         };
 
         if self.last_state_signature != sig {
+            let is_transition_to_waiting = !self.last_state_signature.is_empty()
+                && matches!(state, AgentState::WaitingForInput { .. });
+
             self.last_state_signature = sig;
-            self.is_acknowledged = false; // Reset ack on any state transition
+
+            if is_transition_to_waiting {
+                self.is_unacknowledged = true;
+            } else {
+                self.is_unacknowledged = false;
+            }
         }
     }
 
     pub fn acknowledge(&mut self) {
-        self.is_acknowledged = true;
+        self.is_unacknowledged = false;
     }
 
     /// Returns true if this component should actively pulse/blink
     pub fn should_blink(&self, state: &AgentState) -> bool {
-        matches!(state, AgentState::WaitingForInput { .. }) && !self.is_acknowledged
+        matches!(state, AgentState::WaitingForInput { .. }) && self.is_unacknowledged
     }
 }
 
