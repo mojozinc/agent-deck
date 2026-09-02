@@ -43,7 +43,7 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 1
                         SessionEvent::new(
                             "win-gemini-1",
-                            "Gemini Win (Terminal 1)",
+                            "Gemini • Terminal 1",
                             "Gemini",
                             AgentState::RunningTool {
                                 name: "replace_file_content".to_string(),
@@ -63,10 +63,10 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 2
                         SessionEvent::new(
                             "win-gemini-2",
-                            "Gemini Win (Terminal 2)",
+                            "Gemini • Terminal 2",
                             "Gemini",
                             AgentState::Idle,
-                            "GEMINI IDLE: Listening for next prompt in PowerShell...",
+                            "IDLE: Listening for next instruction in PowerShell",
                             counter + 5,
                             SessionMetadata {
                                 host: "Windows".to_string(),
@@ -80,7 +80,7 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 1 (tmux backend)
                         SessionEvent::new(
                             "wsl-gemini-backend",
-                            "Gemini [tmux:backend:0.1]",
+                            "Gemini • tmux:backend:0.1",
                             "Gemini",
                             AgentState::WaitingForInput {
                                 prompt_preview: "Proceed with running database migrations on postgres-dev? [Y/n]".to_string(),
@@ -99,13 +99,13 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 2 (tmux worker)
                         SessionEvent::new(
                             "wsl-gemini-worker",
-                            "Gemini [tmux:worker:0.0]",
+                            "Gemini • tmux:worker:0.0",
                             "Gemini",
                             AgentState::RunningTool {
                                 name: "cargo_test".to_string(),
                                 summary: "Running integration test suite".to_string(),
                             },
-                            "TEST: cargo test --test api_gateway [18/22 passed]",
+                            "TEST: cargo test --test api_gateway (18/22 passed)",
                             counter + 24,
                             SessionMetadata {
                                 host: "WSL2-Ubuntu".to_string(),
@@ -119,7 +119,7 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 3 (direct terminal)
                         SessionEvent::new(
                             "wsl-gemini-frontend",
-                            "Gemini (WSL2 Shell)",
+                            "Gemini • Shell",
                             "Gemini",
                             AgentState::Thinking,
                             "THINKING: Analyzing call hierarchy for router.rs",
@@ -138,7 +138,7 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 1 -> Thinking
                         SessionEvent::new(
                             "win-gemini-1",
-                            "Gemini Win (Terminal 1)",
+                            "Gemini • Terminal 1",
                             "Gemini",
                             AgentState::Thinking,
                             "THINKING: Verifying Rust borrow checker rules for token lifetime",
@@ -155,7 +155,7 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 2 -> Waiting for input
                         SessionEvent::new(
                             "win-gemini-2",
-                            "Gemini Win (Terminal 2)",
+                            "Gemini • Terminal 2",
                             "Gemini",
                             AgentState::WaitingForInput {
                                 prompt_preview: "Allow execution of cargo build --release? [y/N]".to_string(),
@@ -174,7 +174,7 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 1 -> Thinking
                         SessionEvent::new(
                             "wsl-gemini-backend",
-                            "Gemini [tmux:backend:0.1]",
+                            "Gemini • tmux:backend:0.1",
                             "Gemini",
                             AgentState::Thinking,
                             "THINKING: Evaluating diesel ORM schema changes against user models",
@@ -191,12 +191,12 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 2 -> Waiting for input
                         SessionEvent::new(
                             "wsl-gemini-worker",
-                            "Gemini [tmux:worker:0.0]",
+                            "Gemini • tmux:worker:0.0",
                             "Gemini",
                             AgentState::WaitingForInput {
                                 prompt_preview: "Allow execution of bash deploy script? [y/N]".to_string(),
                             },
-                            "PERMISSION REQUIRED: Execute bash script `scripts/deploy.sh` [y/N]",
+                            "PERMISSION REQUIRED: Execute bash script scripts/deploy.sh [y/N]",
                             counter + 24,
                             SessionMetadata {
                                 host: "WSL2-Ubuntu".to_string(),
@@ -212,7 +212,7 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 1 -> Running tool
                         SessionEvent::new(
                             "win-gemini-1",
-                            "Gemini Win (Terminal 1)",
+                            "Gemini • Terminal 1",
                             "Gemini",
                             AgentState::RunningTool {
                                 name: "cargo_check".to_string(),
@@ -232,7 +232,7 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 1 -> Running tool
                         SessionEvent::new(
                             "wsl-gemini-backend",
-                            "Gemini [tmux:backend:0.1]",
+                            "Gemini • tmux:backend:0.1",
                             "Gemini",
                             AgentState::RunningTool {
                                 name: "run_command".to_string(),
@@ -254,10 +254,10 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 1 -> Finished
                         SessionEvent::new(
                             "win-gemini-1",
-                            "Gemini Win (Terminal 1)",
+                            "Gemini • Terminal 1",
                             "Gemini",
                             AgentState::Finished,
-                            "ALL TASKS COMPLETED: Auth middleware refactored & checked.",
+                            "ALL TASKS COMPLETED: Auth middleware refactored & checked",
                             counter,
                             SessionMetadata {
                                 host: "Windows".to_string(),
@@ -271,10 +271,10 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 1 -> Finished
                         SessionEvent::new(
                             "wsl-gemini-backend",
-                            "Gemini [tmux:backend:0.1]",
+                            "Gemini • tmux:backend:0.1",
                             "Gemini",
                             AgentState::Finished,
-                            "ALL MIGRATIONS APPLIED: Schema version is up to date (004_add_users)",
+                            "ALL MIGRATIONS APPLIED: Schema version up to date (004_add_users)",
                             counter + 10,
                             SessionMetadata {
                                 host: "WSL2-Ubuntu".to_string(),
@@ -288,7 +288,7 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 2 -> Finished
                         SessionEvent::new(
                             "wsl-gemini-worker",
-                            "Gemini [tmux:worker:0.0]",
+                            "Gemini • tmux:worker:0.0",
                             "Gemini",
                             AgentState::Finished,
                             "ALL TESTS PASSED: 22/22 integration tests green",
@@ -307,10 +307,10 @@ impl StreamAdapter for MockAdapter {
                         // Windows Native Session 1 -> Idle
                         SessionEvent::new(
                             "win-gemini-1",
-                            "Gemini Win (Terminal 1)",
+                            "Gemini • Terminal 1",
                             "Gemini",
                             AgentState::Idle,
-                            "GEMINI IDLE: Ready for next task in Windows terminal...",
+                            "IDLE: Ready for next task in Windows terminal",
                             counter,
                             SessionMetadata {
                                 host: "Windows".to_string(),
@@ -324,10 +324,10 @@ impl StreamAdapter for MockAdapter {
                         // WSL2 Session 1 -> Idle
                         SessionEvent::new(
                             "wsl-gemini-backend",
-                            "Gemini [tmux:backend:0.1]",
+                            "Gemini • tmux:backend:0.1",
                             "Gemini",
                             AgentState::Idle,
-                            "GEMINI IDLE: Session active in tmux:backend. Listening for prompt...",
+                            "IDLE: Session active in tmux:backend. Listening for prompt",
                             counter + 10,
                             SessionMetadata {
                                 host: "WSL2-Ubuntu".to_string(),

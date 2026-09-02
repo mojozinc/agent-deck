@@ -18,7 +18,7 @@ impl NativeWindowsAdapter {
 
 impl StreamAdapter for NativeWindowsAdapter {
     fn name(&self) -> &'static str {
-        "Native Windows AGY Adapter"
+        "Native Windows Gemini Adapter"
     }
 
     fn start(&mut self, tx: Sender<SessionEvent>) {
@@ -32,7 +32,6 @@ impl StreamAdapter for NativeWindowsAdapter {
             loop {
                 thread::sleep(Duration::from_millis(450));
 
-                // 1. Find the latest modified session folder
                 if let Ok(entries) = std::fs::read_dir(&brain_dir) {
                     let mut latest_dir: Option<(PathBuf, String, std::time::SystemTime)> = None;
                     for entry in entries.flatten() {
@@ -105,30 +104,31 @@ impl StreamAdapter for NativeWindowsAdapter {
                                                         name: tool_name.to_string(),
                                                         summary: tool_summary.to_string(),
                                                     },
-                                                    format!("TOOL [{}]: {} - {}", tool_name, tool_summary, tool_action),
+                                                    format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
                                                 )
                                             } else {
-                                                (AgentState::Thinking, "THINKING / REASONING...".to_string())
+                                                (AgentState::Thinking, "THINKING • REASONING...".to_string())
                                             }
                                         } else if step_type == "USER_INPUT" || source == "USER_EXPLICIT" {
                                             let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
                                             let preview: String = content.chars().take(60).collect();
-                                            (AgentState::Thinking, format!("PROCESSING PROMPT: {}", preview))
+                                            (AgentState::Thinking, format!("PROCESSING: {}", preview))
                                         } else if step_type == "PLANNER_RESPONSE" && status == "DONE" {
                                             (
                                                 AgentState::WaitingForInput {
                                                     prompt_preview: "Ready for input".to_string(),
                                                 },
-                                                "WAITING FOR USER INPUT / PROMPT".to_string(),
+                                                "INPUT REQUIRED: Waiting for user prompt".to_string(),
                                             )
                                         } else {
                                             (AgentState::Thinking, format!("STEP #{}: {}", step_index, step_type))
                                         };
 
+                                        let short_id: String = session_id.chars().take(6).collect();
                                         let event = SessionEvent::new(
-                                            format!("win-agy-{}", session_id),
-                                            "AGY (Win Native)",
-                                            "AGY-WIN",
+                                            format!("win-gemini-{}", session_id),
+                                            format!("Gemini • {}", short_id),
+                                            "Gemini",
                                             state,
                                             status_text,
                                             step_index,
@@ -153,4 +153,3 @@ impl StreamAdapter for NativeWindowsAdapter {
         });
     }
 }
-

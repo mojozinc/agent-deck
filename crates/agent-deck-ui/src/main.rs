@@ -69,6 +69,7 @@ impl AgentDeckApp {
     ) {
         let is_active = matches!(session.state, AgentState::Thinking | AgentState::RunningTool { .. });
         let is_waiting = matches!(session.state, AgentState::WaitingForInput { .. });
+        let should_blink = session.attention.should_blink(&session.state);
 
         // Update session's individual VU meter levels
         for (i, bar) in session.vu_levels.iter_mut().enumerate() {
@@ -77,7 +78,11 @@ impl AgentDeckApp {
                     * ((pulse_phase * 1.1 + (8 - i) as f32 * 0.4).cos() * 0.4 + 0.6);
                 *bar = lerp(*bar, wave, dt * 12.0);
             } else if is_waiting {
-                let pulse = (pulse_phase * 2.5).sin().abs() * 0.8;
+                let pulse = if should_blink {
+                    (pulse_phase * 2.5).sin().abs() * 0.8
+                } else {
+                    0.5 // Steady warm glow when acknowledged
+                };
                 *bar = lerp(*bar, pulse, dt * 8.0);
             } else {
                 *bar = lerp(*bar, 0.05, dt * 4.0);
@@ -92,10 +97,11 @@ impl AgentDeckApp {
 
         let is_selected = self.selected_session_id.as_deref() == Some(&session.session_id);
 
-        // Interact sense (click row to select)
+        // Interact sense (click row to select & acknowledge alert)
         let response = ui.interact(row_rect, ui.id().with(&session.session_id), egui::Sense::click());
         if response.clicked() {
             self.selected_session_id = Some(session.session_id.clone());
+            session.attention.acknowledge(); // Acknowledge alert on row click!
         }
 
         let painter = ui.painter_at(row_rect);
@@ -111,13 +117,17 @@ impl AgentDeckApp {
 
         let stroke_color = if is_selected {
             Color32::from_rgb(0, 220, 140)
-        } else if is_waiting {
+        } else if should_blink {
+            // Unacknowledged: actively blink
             let blink = (pulse_phase * 2.5).sin() > 0.0;
             if blink {
                 Color32::from_rgb(255, 190, 20)
             } else {
                 Color32::from_rgb(110, 80, 10)
             }
+        } else if is_waiting {
+            // Acknowledged: solid steady amber
+            Color32::from_rgb(180, 140, 20)
         } else if response.hovered() {
             Color32::from_rgb(45, 75, 55)
         } else {
@@ -147,8 +157,10 @@ impl AgentDeckApp {
         };
 
         let led_center = row_rect.min + vec2(12.0, 14.0);
-        let pulse_intensity = if is_waiting {
+        let pulse_intensity = if should_blink {
             ((pulse_phase * 3.2).sin() * 0.4 + 0.6).clamp(0.1, 1.0)
+        } else if is_waiting {
+            0.85 // Solid steady amber when acked
         } else if is_active {
             ((pulse_phase * 2.2).sin() * 0.25 + 0.75).clamp(0.2, 1.0)
         } else {
@@ -164,17 +176,17 @@ impl AgentDeckApp {
         painter.circle_filled(led_center, 4.2, glow_rgba);
         painter.circle_filled(led_center, 1.8, Color32::WHITE);
 
-        // 2. Line 1: Header / Badges (Reactive positioning based on width)
+        // 2. Line 1: Clean Metadata & Badges (No noisy brackets)
         let header_y = row_rect.min.y + 6.0;
 
         let badge_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
             if let Some(ref tmux_w) = session.metadata.tmux_window {
-                format!("[tmux:{}:{}]", tmux_s, tmux_w)
+                format!("tmux:{}:{}", tmux_s, tmux_w)
             } else {
-                format!("[tmux:{}]", tmux_s)
+                format!("tmux:{}", tmux_s)
             }
         } else {
-            format!("[{}]", session.display_name)
+            session.display_name.clone()
         };
 
         let badge_len_approx = badge_text.len() as f32 * 6.2;
@@ -189,12 +201,12 @@ impl AgentDeckApp {
         );
 
         // State pill placed reactively after badge
-        let state_x = (badge_x + badge_len_approx + 12.0).min(row_rect.max.x - 170.0);
+        let state_x = (badge_x + badge_len_approx + 14.0).min(row_rect.max.x - 160.0);
         if state_x > badge_x + 30.0 {
             painter.text(
                 pos2(state_x, header_y),
                 egui::Align2::LEFT_TOP,
-                state_label.to_uppercase(),
+                format!("• {}", state_label.to_uppercase()),
                 FontId::monospace(9.0),
                 main_glow_color,
             );
@@ -204,19 +216,19 @@ impl AgentDeckApp {
         painter.text(
             pos2(row_rect.max.x - 68.0, header_y),
             egui::Align2::RIGHT_TOP,
-            format!("STEP: #{:03}", session.step_count),
+            format!("STEP {:03}", session.step_count),
             FontId::monospace(8.5),
             Color32::from_rgb(60, 160, 90),
         );
 
-        // 3. Line 2: 1-Line Status Marquee Ticker (Reactive width)
+        // 3. Line 2: 1-Line Status Marquee Ticker (Clean text without brackets)
         let marquee_y = row_rect.min.y + 24.0;
         let marquee_area = Rect::from_min_max(
             pos2(row_rect.min.x + 8.0, marquee_y),
             pos2(row_rect.max.x - 68.0, marquee_y + 16.0),
         );
 
-        let display_text = format!("   *** {} ***   ", session.status_text);
+        let display_text = format!("   {}   ", session.status_text);
         let text_color = match &session.state {
             AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 225, 70),
             AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
@@ -297,7 +309,7 @@ impl eframe::App for AgentDeckApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            // Top Header: Winamp Title Bar & Window Controls
+            // Top Header: Clean Typography & Controls
             ui.horizontal(|ui| {
                 ui.add_space(2.0);
                 ui.painter().rect_filled(
@@ -309,7 +321,7 @@ impl eframe::App for AgentDeckApp {
 
                 ui.colored_label(
                     Color32::from_rgb(200, 220, 245),
-                    egui::RichText::new("CYBERAMP // GEMINI DECK v0.3").strong().size(11.0),
+                    egui::RichText::new("CYBERAMP • GEMINI DECK v0.3").strong().size(11.0),
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -320,7 +332,7 @@ impl eframe::App for AgentDeckApp {
                         self.is_compact_mode = !self.is_compact_mode;
                     }
                     let is_sim = self.sim_enabled.load(Ordering::Relaxed);
-                    let mode_text = if is_sim { "SIM: ACTIVE" } else { "SIM: OFF" };
+                    let mode_text = if is_sim { "SIM ACTIVE" } else { "SIM OFF" };
                     let mode_col = if is_sim { Color32::from_rgb(255, 190, 40) } else { Color32::from_rgb(120, 130, 145) };
                     if ui.button(egui::RichText::new(mode_text).size(9.5).color(mode_col)).clicked() {
                         self.sim_enabled.store(!is_sim, Ordering::Relaxed);
@@ -330,32 +342,43 @@ impl eframe::App for AgentDeckApp {
 
             ui.add_space(3.0);
 
-            // Group Sessions by Environment / Hardware Tab
+            // Group Sessions by Environment Tab
             let win_sessions_count = self.hub.windows_sessions().len();
             let wsl_sessions_count = self.hub.wsl2_sessions().len();
 
-            let win_has_waiting = SessionHub::has_waiting_input(&self.hub.windows_sessions());
-            let wsl_has_waiting = SessionHub::has_waiting_input(&self.hub.wsl2_sessions());
+            let win_unacked = SessionHub::has_unacknowledged_input(&self.hub.windows_sessions());
+            let win_waiting = SessionHub::has_waiting_input(&self.hub.windows_sessions());
 
-            // Hardware / Environment Tabs
+            let wsl_unacked = SessionHub::has_unacknowledged_input(&self.hub.wsl2_sessions());
+            let wsl_waiting = SessionHub::has_waiting_input(&self.hub.wsl2_sessions());
+
+            // Clean Environment Tabs
             ui.horizontal(|ui| {
-                // Tab 0: Gemini (Windows)
+                // Tab 0: Windows
                 let tab0_active = self.hub.selected_tab_idx == 0;
                 let tab0_bg = if tab0_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
-                let tab0_border = if win_has_waiting {
+                
+                let tab0_border = if win_unacked {
                     let blink = (self.pulse_phase * 2.5).sin() > 0.0;
                     if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
+                } else if win_waiting {
+                    Color32::from_rgb(180, 140, 20) // Solid amber when acked
                 } else if tab0_active {
                     Color32::from_rgb(0, 220, 160)
                 } else {
                     Color32::from_rgb(45, 52, 64)
                 };
 
-                let tab0_label = format!(
-                    "{} [ 🪟 Gemini ({}) ]",
-                    if win_has_waiting { "●" } else { "○" },
-                    win_sessions_count
-                );
+                let tab0_dot = if win_unacked {
+                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
+                    if blink { "●" } else { "○" }
+                } else if win_waiting {
+                    "●"
+                } else {
+                    "○"
+                };
+
+                let tab0_label = format!("{} Windows • {}", tab0_dot, win_sessions_count);
 
                 let btn0 = egui::Button::new(
                     egui::RichText::new(tab0_label)
@@ -368,25 +391,34 @@ impl eframe::App for AgentDeckApp {
 
                 if ui.add(btn0).clicked() {
                     self.hub.selected_tab_idx = 0;
+                    self.hub.acknowledge_tab(0); // Acknowledge all in tab on click!
                 }
 
-                // Tab 1: Gemini (WSL2)
+                // Tab 1: WSL2
                 let tab1_active = self.hub.selected_tab_idx == 1;
                 let tab1_bg = if tab1_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
-                let tab1_border = if wsl_has_waiting {
+
+                let tab1_border = if wsl_unacked {
                     let blink = (self.pulse_phase * 2.5).sin() > 0.0;
                     if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
+                } else if wsl_waiting {
+                    Color32::from_rgb(180, 140, 20) // Solid amber when acked
                 } else if tab1_active {
                     Color32::from_rgb(0, 220, 160)
                 } else {
                     Color32::from_rgb(45, 52, 64)
                 };
 
-                let tab1_label = format!(
-                    "{} [ 🐧 Gemini (WSL2) ({}) ]",
-                    if wsl_has_waiting { "●" } else { "○" },
-                    wsl_sessions_count
-                );
+                let tab1_dot = if wsl_unacked {
+                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
+                    if blink { "●" } else { "○" }
+                } else if wsl_waiting {
+                    "●"
+                } else {
+                    "○"
+                };
+
+                let tab1_label = format!("{} WSL2 • {}", tab1_dot, wsl_sessions_count);
 
                 let btn1 = egui::Button::new(
                     egui::RichText::new(tab1_label)
@@ -399,13 +431,14 @@ impl eframe::App for AgentDeckApp {
 
                 if ui.add(btn1).clicked() {
                     self.hub.selected_tab_idx = 1;
+                    self.hub.acknowledge_tab(1); // Acknowledge all in tab on click!
                 }
             });
 
             ui.add_space(4.0);
 
             if !self.is_compact_mode {
-                // Reactive ScrollArea: Automatically fills remaining window height!
+                // Reactive ScrollArea
                 let current_tab = self.hub.selected_tab_idx;
                 let dt = dt;
                 let pulse_phase = self.pulse_phase;
@@ -429,7 +462,7 @@ impl eframe::App for AgentDeckApp {
                             ui.vertical_centered(|ui| {
                                 ui.colored_label(
                                     Color32::from_rgb(110, 130, 145),
-                                    egui::RichText::new("NO ACTIVE SESSIONS IN THIS ENVIRONMENT").monospace().size(10.0),
+                                    egui::RichText::new("No active sessions in this environment").monospace().size(10.0),
                                 );
                             });
                         } else {
@@ -444,16 +477,16 @@ impl eframe::App for AgentDeckApp {
 
                 ui.add_space(2.0);
 
-                // Bottom Global Status Bar + Tactile Resize Corner Grip
+                // Bottom Global Status Bar
                 let total_sessions = self.hub.sessions.len();
                 let total_waiting = self.hub.sessions.iter().filter(|s| matches!(s.state, AgentState::WaitingForInput { .. })).count();
 
                 ui.horizontal(|ui| {
                     let pulse_dot = if (self.pulse_phase * 1.5).sin() > 0.0 { "●" } else { "○" };
                     let status_msg = if total_waiting > 0 {
-                        format!("{} {} ACTIVE | ⚠️ {} REQUIRING INPUT", pulse_dot, total_sessions, total_waiting)
+                        format!("{} {} active • {} requiring input", pulse_dot, total_sessions, total_waiting)
                     } else {
-                        format!("{} {} ACTIVE SESSIONS MONITORED", pulse_dot, total_sessions)
+                        format!("{} {} active sessions monitored", pulse_dot, total_sessions)
                     };
 
                     let msg_color = if total_waiting > 0 {
@@ -468,7 +501,7 @@ impl eframe::App for AgentDeckApp {
                         // Tactile Resize Handle in Bottom Right
                         let (resize_id, resize_rect) = ui.allocate_space(vec2(12.0, 12.0));
                         let resize_resp = ui.interact(resize_rect, resize_id, egui::Sense::drag());
-                        
+
                         let grip_color = if resize_resp.hovered() || resize_resp.dragged() {
                             Color32::from_rgb(0, 220, 160)
                         } else {
@@ -476,8 +509,8 @@ impl eframe::App for AgentDeckApp {
                         };
 
                         let p = ui.painter();
-                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 8.0), pos2(resize_rect.max.x - 8.0, resize_rect.max.y - 2.0)], Stroke::new(1.0, grip_color));
-                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 4.0), pos2(resize_rect.max.x - 4.0, resize_rect.max.y - 2.0)], Stroke::new(1.0, grip_color));
+                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 8.0), pos2(resize_rect.max.x - 8.0, resize_rect.max.y - 2.0)], Stroke::new(1.0_f32, grip_color));
+                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 4.0), pos2(resize_rect.max.x - 4.0, resize_rect.max.y - 2.0)], Stroke::new(1.0_f32, grip_color));
 
                         if resize_resp.dragged() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast));
@@ -485,7 +518,7 @@ impl eframe::App for AgentDeckApp {
 
                         ui.colored_label(
                             Color32::from_rgb(50, 75, 60),
-                            egui::RichText::new("[CLICK ROW TO HIGHLIGHT | DRAG CORNER TO RESIZE]").monospace().size(8.0),
+                            egui::RichText::new("Click to Ack • Drag corner to resize").monospace().size(8.0),
                         );
                     });
                 });
@@ -498,13 +531,13 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 240.0])
-            .with_min_inner_size([440.0, 130.0]) // Safe minimum size to prevent edge cases
+            .with_min_inner_size([440.0, 130.0])
             .with_max_inner_size([1200.0, 800.0])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
             .with_resizable(true)
-            .with_title("CyberAmp // Gemini Deck"),
+            .with_title("CyberAmp • Gemini Deck"),
         ..Default::default()
     };
 
