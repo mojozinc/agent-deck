@@ -68,19 +68,18 @@ impl AgentDeckApp {
                     * ((pulse_phase * 1.1 + (8 - i) as f32 * 0.4).cos() * 0.4 + 0.6);
                 *bar = lerp(*bar, wave, dt * 12.0);
             } else if is_waiting {
-                let pulse = if should_blink {
-                    (pulse_phase * 2.5).sin().abs() * 0.8
-                } else {
-                    0.5
-                };
-                *bar = lerp(*bar, pulse, dt * 8.0);
+                *bar = lerp(*bar, 0.0, dt * 6.0); // Calm resting state when waiting for input
             } else {
                 *bar = lerp(*bar, 0.05, dt * 4.0);
             }
         }
 
-        // Marquee scroll
-        session.marquee_offset += dt * 38.0;
+        // Marquee scroll only when actively running/thinking
+        if !is_waiting {
+            session.marquee_offset += dt * 38.0;
+        } else {
+            session.marquee_offset = 0.0;
+        }
 
         let row_height = 48.0;
         let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
@@ -207,32 +206,46 @@ impl AgentDeckApp {
             Color32::from_rgb(60, 160, 90),
         );
 
-        // 3. Line 2: Status Marquee Ticker
+        // 3. Line 2: Status Text Display (Static when waiting for input, scrolling when active)
         let marquee_y = row_rect.min.y + 24.0;
         let marquee_area = Rect::from_min_max(
             pos2(row_rect.min.x + 8.0, marquee_y),
             pos2(row_rect.max.x - 68.0, marquee_y + 16.0),
         );
 
-        let display_text = format!("   {}   ", session.status_text);
         let text_color = match &session.state {
-            AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 225, 70),
+            AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 215, 60),
             AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
             AgentState::Finished => Color32::from_rgb(100, 220, 255),
             _ => Color32::from_rgb(40, 255, 120),
         };
 
         let font = FontId::monospace(10.5);
-        let approx_char_width = 6.4;
-        let total_text_width = display_text.len() as f32 * approx_char_width;
-        let offset_mod = session.marquee_offset % (total_text_width + 40.0);
-        let start_x = marquee_area.max.x - offset_mod;
 
         let mut row_painter = ui.painter_at(row_rect);
         let prev_clip = row_painter.clip_rect();
         row_painter.set_clip_rect(marquee_area);
-        row_painter.text(pos2(start_x, marquee_y), egui::Align2::LEFT_TOP, &display_text, font.clone(), text_color);
-        row_painter.text(pos2(start_x + total_text_width + 40.0, marquee_y), egui::Align2::LEFT_TOP, &display_text, font, text_color);
+
+        if is_waiting {
+            // Stop scrolling text completely - no movement, clean static text!
+            row_painter.text(
+                pos2(marquee_area.min.x + 2.0, marquee_y),
+                egui::Align2::LEFT_TOP,
+                &session.status_text,
+                font,
+                text_color,
+            );
+        } else {
+            // Smooth scrolling marquee for long active logs
+            let display_text = format!("   {}   ", session.status_text);
+            let approx_char_width = 6.4;
+            let total_text_width = display_text.len() as f32 * approx_char_width;
+            let offset_mod = session.marquee_offset % (total_text_width + 40.0);
+            let start_x = marquee_area.max.x - offset_mod;
+
+            row_painter.text(pos2(start_x, marquee_y), egui::Align2::LEFT_TOP, &display_text, font.clone(), text_color);
+            row_painter.text(pos2(start_x + total_text_width + 40.0, marquee_y), egui::Align2::LEFT_TOP, &display_text, font, text_color);
+        }
         row_painter.set_clip_rect(prev_clip);
 
         // 4. Mini VU Meter on Right

@@ -1,4 +1,4 @@
-﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
 
@@ -25,6 +25,8 @@ pub const DEFAULT_TABS: &[TabConfig] = &[
     },
 ];
 
+pub const ENABLE_BLINKING_ALERTS: bool = false; // Feature flag for blinking alerts (turned off)
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttentionState {
     pub is_unacknowledged: bool,
@@ -34,13 +36,12 @@ pub struct AttentionState {
 impl AttentionState {
     pub fn new() -> Self {
         Self {
-            is_unacknowledged: false, // Default false: deck starts calm without blinking on launch
+            is_unacknowledged: false, // Default false: deck starts calm without blinking
             last_state_signature: String::new(),
         }
     }
 
     /// Updates the attention tracker with a new state.
-    /// Only triggers unacknowledged blinking when transitioning from another state into WaitingForInput.
     pub fn update(&mut self, state: &AgentState, step_count: u32) {
         let sig = match state {
             AgentState::WaitingForInput { prompt_preview } => format!("waiting:{}:{}", step_count, prompt_preview),
@@ -71,7 +72,7 @@ impl AttentionState {
 
     /// Returns true if this component should actively pulse/blink
     pub fn should_blink(&self, state: &AgentState) -> bool {
-        matches!(state, AgentState::WaitingForInput { .. }) && self.is_unacknowledged
+        ENABLE_BLINKING_ALERTS && matches!(state, AgentState::WaitingForInput { .. }) && self.is_unacknowledged
     }
 }
 
