@@ -321,7 +321,7 @@ impl eframe::App for AgentDeckApp {
 
                 ui.colored_label(
                     Color32::from_rgb(200, 220, 245),
-                    egui::RichText::new("CYBERAMP • GEMINI DECK v0.3").strong().size(11.0),
+                    egui::RichText::new("AGENT-DECK v0.3").strong().size(11.0),
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -537,12 +537,12 @@ fn main() -> eframe::Result<()> {
             .with_transparent(true)
             .with_always_on_top()
             .with_resizable(true)
-            .with_title("CyberAmp • Gemini Deck"),
+            .with_title("Agent Deck"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "CyberAmp Gemini Deck",
+        "Agent Deck",
         native_options,
         Box::new(|cc| Ok(Box::new(AgentDeckApp::new(cc)))),
     )
