@@ -1,12 +1,13 @@
 ﻿use super::StreamAdapter;
 use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub struct NativeWindowsAdapter;
 
@@ -26,14 +27,18 @@ impl StreamAdapter for NativeWindowsAdapter {
             let home_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\schordinger".to_string());
             let brain_dir = PathBuf::from(home_dir).join(".gemini\\antigravity-cli\\brain");
 
-            let mut current_watched_file: Option<PathBuf> = None;
-            let mut last_file_pos: u64 = 0;
+            let mut watched_files: HashMap<PathBuf, u64> = HashMap::new();
 
             loop {
-                thread::sleep(Duration::from_millis(450));
+                thread::sleep(Duration::from_millis(400));
+
+                if !brain_dir.exists() {
+                    continue;
+                }
 
                 if let Ok(entries) = std::fs::read_dir(&brain_dir) {
-                    let mut latest_dir: Option<(PathBuf, String, std::time::SystemTime)> = None;
+                    let mut candidate_sessions: Vec<(PathBuf, String, SystemTime)> = Vec::new();
+
                     for entry in entries.flatten() {
                         if let Ok(file_type) = entry.file_type() {
                             if file_type.is_dir() {
@@ -42,8 +47,11 @@ impl StreamAdapter for NativeWindowsAdapter {
                                 if transcript_path.exists() {
                                     if let Ok(meta) = std::fs::metadata(&transcript_path) {
                                         if let Ok(modified) = meta.modified() {
-                                            if latest_dir.as_ref().map_or(true, |(_, _, latest_time)| modified > *latest_time) {
-                                                latest_dir = Some((transcript_path, session_id, modified));
+                                            // Only consider sessions modified in the last 48 hours
+                                            if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
+                                                if elapsed < Duration::from_secs(48 * 3600) {
+                                                    candidate_sessions.push((transcript_path, session_id, modified));
+                                                }
                                             }
                                         }
                                     }
@@ -52,20 +60,21 @@ impl StreamAdapter for NativeWindowsAdapter {
                         }
                     }
 
-                    if let Some((latest_transcript, session_id, _)) = latest_dir {
-                        if current_watched_file.as_ref() != Some(&latest_transcript) {
-                            current_watched_file = Some(latest_transcript.clone());
-                            last_file_pos = 0;
-                        }
+                    // Sort candidates by most recently modified
+                    candidate_sessions.sort_by(|a, b| b.2.cmp(&a.2));
 
-                        if let Ok(mut file) = File::open(&latest_transcript) {
+                    // Process ALL active / recent sessions simultaneously!
+                    for (transcript_path, session_id, _) in candidate_sessions {
+                        let last_pos = watched_files.get(&transcript_path).copied().unwrap_or(0);
+
+                        if let Ok(mut file) = File::open(&transcript_path) {
                             let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
-                            if file_len > last_file_pos {
-                                if last_file_pos == 0 && file_len > 8192 {
+                            if file_len > last_pos || last_pos == 0 {
+                                if last_pos == 0 && file_len > 8192 {
                                     let _ = file.seek(SeekFrom::Start(file_len - 8192));
                                 } else {
-                                    let _ = file.seek(SeekFrom::Start(last_file_pos));
+                                    let _ = file.seek(SeekFrom::Start(last_pos));
                                 }
 
                                 let reader = BufReader::new(file);
@@ -76,7 +85,7 @@ impl StreamAdapter for NativeWindowsAdapter {
                                     }
                                 }
 
-                                last_file_pos = file_len;
+                                watched_files.insert(transcript_path.clone(), file_len);
 
                                 if let Some(line) = last_valid_line {
                                     if let Ok(json) = serde_json::from_str::<Value>(&line) {
@@ -111,7 +120,12 @@ impl StreamAdapter for NativeWindowsAdapter {
                                             }
                                         } else if step_type == "USER_INPUT" || source == "USER_EXPLICIT" {
                                             let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                            let preview: String = content.chars().take(60).collect();
+                                            let clean_content = content
+                                                .lines()
+                                                .filter(|l| !l.starts_with('<') && !l.ends_with('>'))
+                                                .collect::<Vec<&str>>()
+                                                .join(" ");
+                                            let preview: String = clean_content.chars().take(60).collect();
                                             (AgentState::Thinking, format!("PROCESSING: {}", preview))
                                         } else if step_type == "PLANNER_RESPONSE" && status == "DONE" {
                                             (

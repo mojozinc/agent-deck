@@ -1,9 +1,8 @@
-﻿#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
 
-use adapter::mock::MockAdapter;
 use adapter::native_windows::NativeWindowsAdapter;
 use adapter::wsl2_bridge::Wsl2BridgeAdapter;
 use adapter::StreamAdapter;
@@ -11,8 +10,6 @@ use agent_deck_core::AgentState;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
 use hub::{ActiveSession, SessionHub, DEFAULT_TABS};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -24,7 +21,6 @@ pub struct AgentDeckApp {
     selected_session_id: Option<String>,
     last_frame_time: Instant,
     pulse_phase: f32,
-    sim_enabled: Arc<AtomicBool>,
     is_compact_mode: bool,
 }
 
@@ -36,9 +32,8 @@ impl AgentDeckApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let mut hub = SessionHub::new();
-        let sim_enabled = Arc::new(AtomicBool::new(false)); // Default SIM OFF
 
-        // 1. In-Process Native Windows Watcher
+        // 1. In-Process Native Windows Watcher (monitors all active Windows sessions)
         let mut native_adapter = NativeWindowsAdapter::new();
         native_adapter.start(hub.sender());
 
@@ -46,16 +41,11 @@ impl AgentDeckApp {
         let mut wsl2_adapter = Wsl2BridgeAdapter::new("127.0.0.1:8765");
         wsl2_adapter.start(hub.sender());
 
-        // 3. Mock Simulation Adapter
-        let mut mock_adapter = MockAdapter::new(sim_enabled.clone());
-        mock_adapter.start(hub.sender());
-
         Self {
             hub,
             selected_session_id: None,
             last_frame_time: Instant::now(),
             pulse_phase: 0.0,
-            sim_enabled,
             is_compact_mode: false,
         }
     }
@@ -326,12 +316,6 @@ impl eframe::App for AgentDeckApp {
                     }
                     if ui.button(egui::RichText::new(if self.is_compact_mode { "▲" } else { "▼" }).size(9.0)).clicked() {
                         self.is_compact_mode = !self.is_compact_mode;
-                    }
-                    let is_sim = self.sim_enabled.load(Ordering::Relaxed);
-                    let mode_text = if is_sim { "SIM ACTIVE" } else { "SIM OFF" };
-                    let mode_col = if is_sim { Color32::from_rgb(255, 190, 40) } else { Color32::from_rgb(120, 130, 145) };
-                    if ui.button(egui::RichText::new(mode_text).size(9.5).color(mode_col)).clicked() {
-                        self.sim_enabled.store(!is_sim, Ordering::Relaxed);
                     }
                 });
             });
