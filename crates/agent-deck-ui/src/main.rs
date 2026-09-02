@@ -9,8 +9,8 @@ use adapter::wsl2_bridge::Wsl2BridgeAdapter;
 use adapter::StreamAdapter;
 use agent_deck_core::AgentState;
 use eframe::egui;
-use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
-use hub::SessionHub;
+use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke, Vec2};
+use hub::{ActiveSession, SessionHub};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,10 +21,8 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 pub struct AgentDeckApp {
     hub: SessionHub,
-    active_channel_idx: usize,
-    marquee_offset: f32,
+    selected_session_id: Option<String>,
     last_frame_time: Instant,
-    vu_levels: [f32; 16],
     pulse_phase: f32,
     sim_enabled: Arc<AtomicBool>,
     is_compact_mode: bool,
@@ -33,34 +31,235 @@ pub struct AgentDeckApp {
 impl AgentDeckApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut visuals = egui::Visuals::dark();
-        visuals.window_fill = Color32::from_rgb(18, 20, 24);
-        visuals.panel_fill = Color32::from_rgb(18, 20, 24);
+        visuals.window_fill = Color32::from_rgb(16, 18, 22);
+        visuals.panel_fill = Color32::from_rgb(16, 18, 22);
         cc.egui_ctx.set_visuals(visuals);
 
         let mut hub = SessionHub::new();
         let sim_enabled = Arc::new(AtomicBool::new(true));
 
-        // 1. Start In-Process Native Windows Watcher Adapter
+        // 1. In-Process Native Windows Watcher
         let mut native_adapter = NativeWindowsAdapter::new();
         native_adapter.start(hub.sender());
 
-        // 2. Start WSL2 Activity Bridge Adapter (TCP client to daemon on 127.0.0.1:8765)
+        // 2. WSL2 Activity Bridge (Connecting to WSL2 daemon on 127.0.0.1:8765)
         let mut wsl2_adapter = Wsl2BridgeAdapter::new("127.0.0.1:8765");
         wsl2_adapter.start(hub.sender());
 
-        // 3. Start Mock Simulation Adapter (active by default for test mode)
+        // 3. Mock Simulation Adapter
         let mut mock_adapter = MockAdapter::new(sim_enabled.clone());
         mock_adapter.start(hub.sender());
 
         Self {
             hub,
-            active_channel_idx: 0,
-            marquee_offset: 0.0,
+            selected_session_id: None,
             last_frame_time: Instant::now(),
-            vu_levels: [0.0; 16],
             pulse_phase: 0.0,
             sim_enabled,
             is_compact_mode: false,
+        }
+    }
+
+    fn render_session_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut ActiveSession,
+        dt: f32,
+        pulse_phase: f32,
+    ) {
+        let is_active = matches!(session.state, AgentState::Thinking | AgentState::RunningTool { .. });
+        let is_waiting = matches!(session.state, AgentState::WaitingForInput { .. });
+
+        // Update session's individual VU meter levels
+        for (i, bar) in session.vu_levels.iter_mut().enumerate() {
+            if is_active {
+                let wave = ((pulse_phase * 2.8 + i as f32 * 0.6).sin() * 0.5 + 0.5)
+                    * ((pulse_phase * 1.1 + (8 - i) as f32 * 0.4).cos() * 0.4 + 0.6);
+                *bar = lerp(*bar, wave, dt * 12.0);
+            } else if is_waiting {
+                let pulse = (pulse_phase * 2.5).sin().abs() * 0.8;
+                *bar = lerp(*bar, pulse, dt * 8.0);
+            } else {
+                *bar = lerp(*bar, 0.05, dt * 4.0);
+            }
+        }
+
+        // Marquee scroll
+        session.marquee_offset += dt * 38.0;
+
+        let row_height = 48.0;
+        let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
+
+        let is_selected = self.selected_session_id.as_deref() == Some(&session.session_id);
+
+        // Interact sense (click row to select)
+        let response = ui.interact(row_rect, ui.id().with(&session.session_id), egui::Sense::click());
+        if response.clicked() {
+            self.selected_session_id = Some(session.session_id.clone());
+        }
+
+        let painter = ui.painter_at(row_rect);
+
+        // Draw Row Bezel & Background
+        let bg_color = if is_selected {
+            Color32::from_rgb(10, 22, 16)
+        } else if response.hovered() {
+            Color32::from_rgb(12, 18, 14)
+        } else {
+            Color32::from_rgb(7, 12, 9)
+        };
+
+        let stroke_color = if is_selected {
+            Color32::from_rgb(0, 220, 140)
+        } else if is_waiting {
+            let blink = (pulse_phase * 2.5).sin() > 0.0;
+            if blink {
+                Color32::from_rgb(255, 190, 20)
+            } else {
+                Color32::from_rgb(110, 80, 10)
+            }
+        } else if response.hovered() {
+            Color32::from_rgb(45, 75, 55)
+        } else {
+            Color32::from_rgb(26, 38, 30)
+        };
+
+        painter.rect_filled(row_rect, Rounding::same(4.0), bg_color);
+        painter.rect_stroke(row_rect, Rounding::same(4.0), Stroke::new(1.2_f32, stroke_color));
+
+        // Glass Scanline pattern
+        let grid_color = Color32::from_rgba_unmultiplied(20, 45, 25, 30);
+        for y in (row_rect.min.y as i32..row_rect.max.y as i32).step_by(3) {
+            painter.line_segment(
+                [pos2(row_rect.min.x, y as f32), pos2(row_rect.max.x, y as f32)],
+                Stroke::new(0.5_f32, grid_color),
+            );
+        }
+
+        // 1. Status LED Indicator on Left
+        let (state_label, main_glow_color) = match &session.state {
+            AgentState::Thinking => ("THINKING", Color32::from_rgb(0, 255, 128)),
+            AgentState::RunningTool { name, .. } => (name.as_str(), Color32::from_rgb(50, 255, 100)),
+            AgentState::WaitingForInput { .. } => ("INPUT REQUIRED", Color32::from_rgb(255, 205, 20)),
+            AgentState::Error { .. } => ("ERROR", Color32::from_rgb(255, 70, 70)),
+            AgentState::Finished => ("FINISHED", Color32::from_rgb(0, 220, 255)),
+            AgentState::Idle => ("IDLE", Color32::from_rgb(90, 130, 110)),
+        };
+
+        let led_center = row_rect.min + vec2(12.0, 14.0);
+        let pulse_intensity = if is_waiting {
+            ((pulse_phase * 3.2).sin() * 0.4 + 0.6).clamp(0.1, 1.0)
+        } else if is_active {
+            ((pulse_phase * 2.2).sin() * 0.25 + 0.75).clamp(0.2, 1.0)
+        } else {
+            0.6
+        };
+
+        let glow_rgba = Color32::from_rgba_unmultiplied(
+            (main_glow_color.r() as f32 * pulse_intensity) as u8,
+            (main_glow_color.g() as f32 * pulse_intensity) as u8,
+            (main_glow_color.b() as f32 * pulse_intensity) as u8,
+            230,
+        );
+        painter.circle_filled(led_center, 4.2, glow_rgba);
+        painter.circle_filled(led_center, 1.8, Color32::WHITE);
+
+        // 2. Line 1: Header / Badges
+        let header_y = row_rect.min.y + 6.0;
+
+        // Session / tmux tag
+        let badge_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
+            if let Some(ref tmux_w) = session.metadata.tmux_window {
+                format!("[tmux:{}:{}]", tmux_s, tmux_w)
+            } else {
+                format!("[tmux:{}]", tmux_s)
+            }
+        } else {
+            format!("[{}]", session.display_name)
+        };
+
+        painter.text(
+            pos2(row_rect.min.x + 22.0, header_y),
+            egui::Align2::LEFT_TOP,
+            badge_text,
+            FontId::monospace(9.5),
+            Color32::from_rgb(0, 220, 200),
+        );
+
+        // State pill
+        painter.text(
+            pos2(row_rect.min.x + 190.0, header_y),
+            egui::Align2::LEFT_TOP,
+            state_label.to_uppercase(),
+            FontId::monospace(9.0),
+            main_glow_color,
+        );
+
+        // Step Count
+        painter.text(
+            pos2(row_rect.max.x - 70.0, header_y),
+            egui::Align2::RIGHT_TOP,
+            format!("STEP: #{:03}", session.step_count),
+            FontId::monospace(8.5),
+            Color32::from_rgb(60, 160, 90),
+        );
+
+        // 3. Line 2: 1-Line Status Marquee Ticker
+        let marquee_y = row_rect.min.y + 24.0;
+        let marquee_area = Rect::from_min_max(
+            pos2(row_rect.min.x + 8.0, marquee_y),
+            pos2(row_rect.max.x - 68.0, marquee_y + 16.0),
+        );
+
+        let display_text = format!("   *** {} ***   ", session.status_text);
+        let text_color = match &session.state {
+            AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 225, 70),
+            AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
+            AgentState::Finished => Color32::from_rgb(100, 220, 255),
+            _ => Color32::from_rgb(40, 255, 120),
+        };
+
+        let font = FontId::monospace(10.5);
+        let approx_char_width = 6.4;
+        let total_text_width = display_text.len() as f32 * approx_char_width;
+        let offset_mod = session.marquee_offset % (total_text_width + 40.0);
+        let start_x = marquee_area.max.x - offset_mod;
+
+        let mut row_painter = ui.painter_at(row_rect);
+        let prev_clip = row_painter.clip_rect();
+        row_painter.set_clip_rect(marquee_area);
+        row_painter.text(pos2(start_x, marquee_y), egui::Align2::LEFT_TOP, &display_text, font.clone(), text_color);
+        row_painter.text(pos2(start_x + total_text_width + 40.0, marquee_y), egui::Align2::LEFT_TOP, &display_text, font, text_color);
+        row_painter.set_clip_rect(prev_clip);
+
+        // 4. Mini VU Meter on Right
+        let vu_box_min = pos2(row_rect.max.x - 58.0, row_rect.min.y + 12.0);
+        let num_bars = 6;
+        let bar_w = 5.0;
+        let bar_gap = 2.0;
+
+        for i in 0..num_bars {
+            let x = vu_box_min.x + i as f32 * (bar_w + bar_gap);
+            let level = session.vu_levels[i % session.vu_levels.len()];
+            let total_segments = 5;
+            let active_segments = (level * total_segments as f32).round() as usize;
+
+            for seg in 0..total_segments {
+                let seg_y = (row_rect.min.y + 36.0) - (seg as f32 * 3.5);
+                let seg_rect = Rect::from_min_size(pos2(x, seg_y), vec2(bar_w, 2.5));
+                let seg_color = if seg < active_segments {
+                    if seg >= 4 {
+                        Color32::from_rgb(255, 80, 80) // Red Peak
+                    } else if seg >= 3 {
+                        Color32::from_rgb(255, 200, 30) // Amber Mid
+                    } else {
+                        Color32::from_rgb(0, 255, 100) // Green
+                    }
+                } else {
+                    Color32::from_rgb(14, 24, 18)
+                };
+                painter.rect_filled(seg_rect, Rounding::ZERO, seg_color);
+            }
         }
     }
 }
@@ -74,36 +273,13 @@ impl eframe::App for AgentDeckApp {
         self.last_frame_time = now;
         self.pulse_phase += dt * 4.0;
 
-        // Poll all stream adapters for live updates
+        // Ingest stream updates
         self.hub.poll_events();
 
-        if self.active_channel_idx >= self.hub.sessions.len() {
-            self.active_channel_idx = 0;
-        }
-
-        let current_state = &self.hub.sessions[self.active_channel_idx].state;
-        let is_active = matches!(current_state, AgentState::Thinking | AgentState::RunningTool { .. });
-
-        // Animate VU meter equalizer bars
-        for (i, bar) in self.vu_levels.iter_mut().enumerate() {
-            if is_active {
-                let wave = ((self.pulse_phase * 2.5 + i as f32 * 0.45).sin() * 0.5 + 0.5)
-                    * ((self.pulse_phase * 0.8 + (16 - i) as f32 * 0.3).cos() * 0.4 + 0.6);
-                *bar = lerp(*bar, wave, dt * 10.0);
-            } else if matches!(current_state, AgentState::WaitingForInput { .. }) {
-                let pulse = (self.pulse_phase * 2.2).sin().abs() * 0.75;
-                *bar = lerp(*bar, pulse, dt * 8.0);
-            } else {
-                *bar = lerp(*bar, 0.05, dt * 4.0);
-            }
-        }
-
-        self.marquee_offset += dt * 40.0;
-
-        // Draw Retro Winamp Chassis
+        // Draw Retro Winamp Main Frame
         let panel_frame = egui::Frame::none()
-            .fill(Color32::from_rgb(20, 22, 27))
-            .stroke(Stroke::new(1.5_f32, Color32::from_rgb(65, 74, 88)))
+            .fill(Color32::from_rgb(18, 20, 25))
+            .stroke(Stroke::new(1.5_f32, Color32::from_rgb(60, 70, 84)))
             .rounding(Rounding::same(8.0))
             .inner_margin(egui::Margin::same(6.0));
 
@@ -111,12 +287,12 @@ impl eframe::App for AgentDeckApp {
             let full_rect = ui.max_rect();
 
             // Drag window from chassis
-            let drag_response = ui.interact(full_rect, ui.id().with("chassis_drag"), egui::Sense::drag());
+            let drag_response = ui.interact(full_rect, ui.id().with("deck_drag"), egui::Sense::drag());
             if drag_response.dragged() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            // Top Header: Winamp Title & Controls
+            // Top Header: Winamp Title Bar & Window Controls
             ui.horizontal(|ui| {
                 ui.add_space(2.0);
                 ui.painter().rect_filled(
@@ -127,8 +303,8 @@ impl eframe::App for AgentDeckApp {
                 ui.add_space(18.0);
 
                 ui.colored_label(
-                    Color32::from_rgb(200, 220, 240),
-                    egui::RichText::new("CYBERAMP // AGENT-DECK v0.2").strong().size(11.0),
+                    Color32::from_rgb(200, 220, 245),
+                    egui::RichText::new("CYBERAMP // GEMINI DECK v0.3").strong().size(11.0),
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -149,203 +325,145 @@ impl eframe::App for AgentDeckApp {
 
             ui.add_space(3.0);
 
-            // Channel Selector Tabs (Dynamic Winamp Preset Buttons)
+            // Group Sessions by Environment / Hardware Tab
+            let win_sessions_count = self.hub.windows_sessions().len();
+            let wsl_sessions_count = self.hub.wsl2_sessions().len();
+
+            let win_has_waiting = SessionHub::has_waiting_input(&self.hub.windows_sessions());
+            let wsl_has_waiting = SessionHub::has_waiting_input(&self.hub.wsl2_sessions());
+
+            // Hardware / Environment Tabs
             ui.horizontal(|ui| {
-                for (i, session) in self.hub.sessions.iter().enumerate() {
-                    let is_active = self.active_channel_idx == i;
+                // Tab 0: Gemini (Windows)
+                let tab0_active = self.hub.selected_tab_idx == 0;
+                let tab0_bg = if tab0_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
+                let tab0_border = if win_has_waiting {
+                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
+                    if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
+                } else if tab0_active {
+                    Color32::from_rgb(0, 220, 160)
+                } else {
+                    Color32::from_rgb(45, 52, 64)
+                };
 
-                    let led_color = match &session.state {
-                        AgentState::Thinking => Color32::from_rgb(0, 240, 120),
-                        AgentState::RunningTool { .. } => Color32::from_rgb(0, 255, 110),
-                        AgentState::WaitingForInput { .. } => {
-                            let blink = (self.pulse_phase * 2.2).sin() > 0.0;
-                            if blink {
-                                Color32::from_rgb(255, 205, 0)
-                            } else {
-                                Color32::from_rgb(130, 95, 0)
-                            }
-                        }
-                        AgentState::Error { .. } => Color32::from_rgb(255, 50, 50),
-                        AgentState::Finished => Color32::from_rgb(0, 210, 255),
-                        AgentState::Idle => Color32::from_rgb(65, 80, 100),
-                    };
+                let tab0_label = format!(
+                    "{} [ 🪟 Gemini ({}) ]",
+                    if win_has_waiting { "●" } else { "○" },
+                    win_sessions_count
+                );
 
-                    let btn_bg = if is_active {
-                        Color32::from_rgb(42, 50, 64)
-                    } else {
-                        Color32::from_rgb(26, 29, 36)
-                    };
+                let btn0 = egui::Button::new(
+                    egui::RichText::new(tab0_label)
+                        .size(10.0)
+                        .color(if tab0_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
+                )
+                .fill(tab0_bg)
+                .stroke(Stroke::new(1.0_f32, tab0_border))
+                .rounding(Rounding::same(3.0));
 
-                    // Format badge with tmux session tag if available
-                    let label_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
-                        format!("● [tmux:{}] {}", tmux_s, session.agent_type)
-                    } else {
-                        format!("● {}", session.display_name)
-                    };
+                if ui.add(btn0).clicked() {
+                    self.hub.selected_tab_idx = 0;
+                }
 
-                    let btn_text = egui::RichText::new(label_text)
-                        .size(9.5)
-                        .color(if is_active { Color32::WHITE } else { Color32::from_rgb(155, 170, 185) });
+                // Tab 1: Gemini (WSL2)
+                let tab1_active = self.hub.selected_tab_idx == 1;
+                let tab1_bg = if tab1_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
+                let tab1_border = if wsl_has_waiting {
+                    let blink = (self.pulse_phase * 2.5).sin() > 0.0;
+                    if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
+                } else if tab1_active {
+                    Color32::from_rgb(0, 220, 160)
+                } else {
+                    Color32::from_rgb(45, 52, 64)
+                };
 
-                    let button = egui::Button::new(btn_text)
-                        .fill(btn_bg)
-                        .stroke(Stroke::new(1.0_f32, if is_active { led_color } else { Color32::from_rgb(48, 54, 66) }))
-                        .rounding(Rounding::same(3.0));
+                let tab1_label = format!(
+                    "{} [ 🐧 Gemini (WSL2) ({}) ]",
+                    if wsl_has_waiting { "●" } else { "○" },
+                    wsl_sessions_count
+                );
 
-                    if ui.add(button).clicked() {
-                        self.active_channel_idx = i;
-                        self.marquee_offset = 0.0;
-                    }
+                let btn1 = egui::Button::new(
+                    egui::RichText::new(tab1_label)
+                        .size(10.0)
+                        .color(if tab1_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
+                )
+                .fill(tab1_bg)
+                .stroke(Stroke::new(1.0_f32, tab1_border))
+                .rounding(Rounding::same(3.0));
+
+                if ui.add(btn1).clicked() {
+                    self.hub.selected_tab_idx = 1;
                 }
             });
 
             ui.add_space(4.0);
 
-            // Main Display: Skeuomorphic LCD Display + Equalizer
-            let lcd_height = if self.is_compact_mode { 32.0 } else { 58.0 };
-            let lcd_rect = ui.allocate_space(vec2(ui.available_width(), lcd_height)).1;
-
-            let mut painter = ui.painter_at(lcd_rect);
-            painter.rect_filled(lcd_rect, Rounding::same(4.0), Color32::from_rgb(6, 12, 8));
-            painter.rect_stroke(lcd_rect, Rounding::same(4.0), Stroke::new(1.5_f32, Color32::from_rgb(30, 46, 34)));
-
-            // Scanlines
-            let grid_color = Color32::from_rgba_unmultiplied(20, 45, 25, 40);
-            for y in (lcd_rect.min.y as i32..lcd_rect.max.y as i32).step_by(3) {
-                painter.line_segment(
-                    [pos2(lcd_rect.min.x, y as f32), pos2(lcd_rect.max.x, y as f32)],
-                    Stroke::new(0.5_f32, grid_color),
-                );
-            }
-
-            let active_session = &self.hub.sessions[self.active_channel_idx];
-
-            let (state_label, main_glow_color) = match &active_session.state {
-                AgentState::Thinking => ("THINKING", Color32::from_rgb(0, 255, 128)),
-                AgentState::RunningTool { name, .. } => (name.as_str(), Color32::from_rgb(50, 255, 100)),
-                AgentState::WaitingForInput { .. } => ("WAITING INPUT", Color32::from_rgb(255, 210, 20)),
-                AgentState::Error { .. } => ("ERROR", Color32::from_rgb(255, 70, 70)),
-                AgentState::Finished => ("FINISHED", Color32::from_rgb(0, 220, 255)),
-                AgentState::Idle => ("IDLE / READY", Color32::from_rgb(90, 140, 110)),
-            };
-
-            // Glow LED Indicator
-            let led_center = lcd_rect.min + vec2(12.0, 12.0);
-            let pulse_intensity = if matches!(active_session.state, AgentState::WaitingForInput { .. }) {
-                ((self.pulse_phase * 3.0).sin() * 0.4 + 0.6).clamp(0.1, 1.0)
-            } else {
-                ((self.pulse_phase * 2.0).sin() * 0.25 + 0.75).clamp(0.2, 1.0)
-            };
-
-            let glow_rgba = Color32::from_rgba_unmultiplied(
-                (main_glow_color.r() as f32 * pulse_intensity) as u8,
-                (main_glow_color.g() as f32 * pulse_intensity) as u8,
-                (main_glow_color.b() as f32 * pulse_intensity) as u8,
-                230,
-            );
-            painter.circle_filled(led_center, 4.5, glow_rgba);
-            painter.circle_filled(led_center, 2.0, Color32::WHITE);
-
-            // Channel Header (with tmux info if present)
-            let header_text = if let Some(ref tmux_s) = active_session.metadata.tmux_session {
-                format!("[{}:{}] {}", active_session.agent_type, tmux_s, state_label.to_uppercase())
-            } else {
-                format!("[{}] {}", active_session.agent_type, state_label.to_uppercase())
-            };
-
-            painter.text(
-                lcd_rect.min + vec2(22.0, 6.0),
-                egui::Align2::LEFT_TOP,
-                header_text,
-                FontId::monospace(9.5),
-                main_glow_color,
-            );
-
-            // Steps badge
-            painter.text(
-                pos2(lcd_rect.max.x - 8.0, lcd_rect.min.y + 6.0),
-                egui::Align2::RIGHT_TOP,
-                format!("STEP: #{:03}", active_session.step_count),
-                FontId::monospace(9.0),
-                Color32::from_rgb(60, 160, 90),
-            );
-
-            // Marquee Ticker
-            let marquee_y = if self.is_compact_mode { lcd_rect.min.y + 17.0 } else { lcd_rect.min.y + 23.0 };
-            let marquee_area = Rect::from_min_max(
-                pos2(lcd_rect.min.x + 8.0, marquee_y),
-                pos2(lcd_rect.max.x - 90.0, marquee_y + 14.0),
-            );
-
-            let display_text = format!("   *** {} ***   ", active_session.status_text);
-            let text_color = match &active_session.state {
-                AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 230, 80),
-                AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
-                AgentState::Finished => Color32::from_rgb(100, 220, 255),
-                _ => Color32::from_rgb(40, 255, 120),
-            };
-
-            let font = FontId::monospace(11.0);
-            let approx_char_width = 6.8;
-            let total_text_width = display_text.len() as f32 * approx_char_width;
-            let offset_mod = self.marquee_offset % (total_text_width + 40.0);
-            let start_x = marquee_area.max.x - offset_mod;
-
-            let prev_clip = painter.clip_rect();
-            painter.set_clip_rect(marquee_area);
-            painter.text(pos2(start_x, marquee_y), egui::Align2::LEFT_TOP, &display_text, font.clone(), text_color);
-            painter.text(pos2(start_x + total_text_width + 40.0, marquee_y), egui::Align2::LEFT_TOP, &display_text, font, text_color);
-            painter.set_clip_rect(prev_clip);
-
-            // VU Equalizer Bars
-            let vu_box_min = pos2(lcd_rect.max.x - 82.0, marquee_y - 2.0);
-            let num_bars = 10;
-            let bar_w = 6.0;
-            let bar_gap = 2.0;
-            for i in 0..num_bars {
-                let x = vu_box_min.x + i as f32 * (bar_w + bar_gap);
-                let level = self.vu_levels[i % self.vu_levels.len()];
-                let total_segments = 6;
-                let active_segments = (level * total_segments as f32).round() as usize;
-
-                for seg in 0..total_segments {
-                    let seg_y = (marquee_y + 14.0) - (seg as f32 * 2.6);
-                    let seg_rect = Rect::from_min_size(pos2(x, seg_y), vec2(bar_w, 2.0));
-                    let seg_color = if seg < active_segments {
-                        if seg >= 4 {
-                            Color32::from_rgb(255, 80, 80)
-                        } else if seg >= 3 {
-                            Color32::from_rgb(255, 200, 30)
-                        } else {
-                            Color32::from_rgb(0, 255, 100)
-                        }
-                    } else {
-                        Color32::from_rgb(16, 28, 20)
-                    };
-                    painter.rect_filled(seg_rect, Rounding::ZERO, seg_color);
-                }
-            }
-
-            // Footer Status
             if !self.is_compact_mode {
-                let footer_y = lcd_rect.max.y - 14.0;
-                let elapsed = active_session.last_updated.elapsed().as_secs();
-                let pulse_dot = if (self.pulse_phase * 1.5).sin() > 0.0 { "●" } else { "○" };
-                painter.text(
-                    pos2(lcd_rect.min.x + 8.0, footer_y),
-                    egui::Align2::LEFT_TOP,
-                    format!("{} HOST: {} | UPDATED {}s AGO", pulse_dot, active_session.metadata.host, elapsed),
-                    FontId::monospace(8.5),
-                    Color32::from_rgb(45, 110, 70),
-                );
+                // Render N Thick Session Rows inside ScrollArea for the selected Tab
+                let current_tab = self.hub.selected_tab_idx;
+                let dt = dt;
+                let pulse_phase = self.pulse_phase;
 
-                painter.text(
-                    pos2(lcd_rect.max.x - 8.0, footer_y),
-                    egui::Align2::RIGHT_TOP,
-                    "[DRAG TO MOVE | TAB TO SWITCH]",
-                    FontId::monospace(8.0),
-                    Color32::from_rgb(45, 80, 60),
-                );
+                egui::ScrollArea::vertical()
+                    .max_height(145.0)
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        let mut matching_indices: Vec<usize> = Vec::new();
+                        for (idx, s) in self.hub.sessions.iter().enumerate() {
+                            let is_win = s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-");
+                            if (current_tab == 0 && is_win) || (current_tab == 1 && !is_win) {
+                                matching_indices.push(idx);
+                            }
+                        }
+
+                        if matching_indices.is_empty() {
+                            ui.add_space(10.0);
+                            ui.vertical_centered(|ui| {
+                                ui.colored_label(
+                                    Color32::from_rgb(110, 130, 145),
+                                    egui::RichText::new("NO ACTIVE SESSIONS IN THIS ENVIRONMENT").monospace().size(10.0),
+                                );
+                            });
+                        } else {
+                            for idx in matching_indices {
+                                let mut session = self.hub.sessions[idx].clone();
+                                self.render_session_row(ui, &mut session, dt, pulse_phase);
+                                self.hub.sessions[idx] = session;
+                                ui.add_space(3.0);
+                            }
+                        }
+                    });
+
+                ui.add_space(3.0);
+
+                // Bottom Global Status Bar
+                let total_sessions = self.hub.sessions.len();
+                let total_waiting = self.hub.sessions.iter().filter(|s| matches!(s.state, AgentState::WaitingForInput { .. })).count();
+
+                ui.horizontal(|ui| {
+                    let pulse_dot = if (self.pulse_phase * 1.5).sin() > 0.0 { "●" } else { "○" };
+                    let status_msg = if total_waiting > 0 {
+                        format!("{} {} ACTIVE | ⚠️ {} REQUIRING INPUT", pulse_dot, total_sessions, total_waiting)
+                    } else {
+                        format!("{} {} ACTIVE SESSIONS MONITORED", pulse_dot, total_sessions)
+                    };
+
+                    let msg_color = if total_waiting > 0 {
+                        Color32::from_rgb(255, 205, 30)
+                    } else {
+                        Color32::from_rgb(60, 160, 95)
+                    };
+
+                    ui.colored_label(msg_color, egui::RichText::new(status_msg).monospace().size(8.5));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.colored_label(
+                            Color32::from_rgb(50, 75, 60),
+                            egui::RichText::new("[CLICK ROW TO HIGHLIGHT | DRAG DECK]").monospace().size(8.0),
+                        );
+                    });
+                });
             }
         });
     }
@@ -354,21 +472,20 @@ impl eframe::App for AgentDeckApp {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([540.0, 115.0])
-            .with_min_inner_size([400.0, 75.0])
-            .with_max_inner_size([850.0, 160.0])
+            .with_inner_size([560.0, 230.0])
+            .with_min_inner_size([440.0, 80.0])
+            .with_max_inner_size([900.0, 500.0])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
             .with_resizable(true)
-            .with_title("CyberAmp // Agent Deck"),
+            .with_title("CyberAmp // Gemini Deck"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "CyberAmp Agent Deck",
+        "CyberAmp Gemini Deck",
         native_options,
         Box::new(|cc| Ok(Box::new(AgentDeckApp::new(cc)))),
     )
 }
-
