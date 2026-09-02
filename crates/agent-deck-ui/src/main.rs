@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+﻿#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
@@ -9,7 +9,8 @@ use adapter::StreamAdapter;
 use agent_deck_core::AgentState;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
-use hub::{ActiveSession, SessionHub, DEFAULT_TABS};
+use hub::{ActiveSession, CustomTitlesStorage, SessionHub, DEFAULT_TABS};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -19,6 +20,8 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 pub struct AgentDeckApp {
     hub: SessionHub,
     selected_session_id: Option<String>,
+    editing_session_id: Option<String>,
+    edit_text_buffer: String,
     last_frame_time: Instant,
     pulse_phase: f32,
     is_compact_mode: bool,
@@ -31,7 +34,8 @@ impl AgentDeckApp {
         visuals.panel_fill = Color32::from_rgb(16, 18, 22);
         cc.egui_ctx.set_visuals(visuals);
 
-        let mut hub = SessionHub::new();
+        let custom_titles = Arc::new(RwLock::new(CustomTitlesStorage::load()));
+        let mut hub = SessionHub::new(custom_titles);
 
         // 1. In-Process Native Windows Watcher (monitors all active Windows sessions)
         let mut native_adapter = NativeWindowsAdapter::new();
@@ -44,6 +48,8 @@ impl AgentDeckApp {
         Self {
             hub,
             selected_session_id: None,
+            editing_session_id: None,
+            edit_text_buffer: String::new(),
             last_frame_time: Instant::now(),
             pulse_phase: 0.0,
             is_compact_mode: false,
@@ -60,6 +66,7 @@ impl AgentDeckApp {
         let is_active = matches!(session.state, AgentState::Thinking | AgentState::RunningTool { .. });
         let is_waiting = matches!(session.state, AgentState::WaitingForInput { .. });
         let should_blink = session.attention.should_blink(&session.state);
+        let is_editing = self.editing_session_id.as_deref() == Some(&session.session_id);
 
         // Update session's individual VU meter levels
         for (i, bar) in session.vu_levels.iter_mut().enumerate() {
@@ -81,7 +88,7 @@ impl AgentDeckApp {
             session.marquee_offset = 0.0;
         }
 
-        let row_height = 48.0;
+        let row_height = if is_editing { 68.0 } else { 48.0 };
         let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
 
         let is_selected = self.selected_session_id.as_deref() == Some(&session.session_id);
@@ -182,13 +189,26 @@ impl AgentDeckApp {
         painter.text(
             pos2(badge_x, header_y),
             egui::Align2::LEFT_TOP,
-            badge_text,
+            &badge_text,
             FontId::monospace(9.5),
             Color32::from_rgb(0, 220, 200),
         );
 
-        let state_x = (badge_x + badge_len_approx + 14.0).min(row_rect.max.x - 160.0);
-        if state_x > badge_x + 30.0 {
+        // Edit pencil button
+        let edit_btn_rect = Rect::from_min_size(pos2(badge_x + badge_len_approx + 2.0, header_y - 1.0), vec2(14.0, 12.0));
+        let edit_btn_resp = ui.interact(edit_btn_rect, ui.id().with(&session.session_id).with("edit_btn"), egui::Sense::click());
+        if edit_btn_resp.hovered() {
+            painter.text(edit_btn_rect.min, egui::Align2::LEFT_TOP, "✎", FontId::monospace(9.0), Color32::from_rgb(255, 220, 100));
+        } else {
+            painter.text(edit_btn_rect.min, egui::Align2::LEFT_TOP, "✎", FontId::monospace(9.0), Color32::from_rgb(60, 90, 80));
+        }
+        if edit_btn_resp.clicked() {
+            self.editing_session_id = Some(session.session_id.clone());
+            self.edit_text_buffer = session.display_name.clone();
+        }
+
+        let state_x = (badge_x + badge_len_approx + 22.0).min(row_rect.max.x - 160.0);
+        if state_x > badge_x + 35.0 {
             painter.text(
                 pos2(state_x, header_y),
                 egui::Align2::LEFT_TOP,
@@ -265,17 +285,52 @@ impl AgentDeckApp {
                 let seg_rect = Rect::from_min_size(pos2(x, seg_y), vec2(bar_w, 2.5));
                 let seg_color = if seg < active_segments {
                     if seg >= 4 {
-                        Color32::from_rgb(255, 80, 80)
+                        Color32::from_rgb(255, 80, 80) // Red Peak
                     } else if seg >= 3 {
-                        Color32::from_rgb(255, 200, 30)
+                        Color32::from_rgb(255, 200, 30) // Amber Mid
                     } else {
-                        Color32::from_rgb(0, 255, 100)
+                        Color32::from_rgb(0, 255, 100) // Green
                     }
                 } else {
                     Color32::from_rgb(14, 24, 18)
                 };
                 painter.rect_filled(seg_rect, Rounding::ZERO, seg_color);
             }
+        }
+
+        // 5. Inline Rename Overlay (if editing this session)
+        if is_editing {
+            let edit_y = row_rect.min.y + 44.0;
+            let edit_ui_rect = Rect::from_min_size(pos2(row_rect.min.x + 8.0, edit_y), vec2(row_rect.width() - 16.0, 20.0));
+            
+            ui.allocate_ui_at_rect(edit_ui_rect, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(Color32::from_rgb(0, 220, 200), egui::RichText::new("Name:").size(9.0));
+                    
+                    let text_input = ui.add(
+                        egui::TextEdit::singleline(&mut self.edit_text_buffer)
+                            .desired_width(160.0)
+                            .font(FontId::monospace(9.5))
+                    );
+
+                    let enter_pressed = text_input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    
+                    if ui.button(egui::RichText::new("✓ Save").size(8.5)).clicked() || enter_pressed {
+                        let new_name = self.edit_text_buffer.clone();
+                        self.hub.set_custom_name(&session.session_id, &new_name);
+                        self.editing_session_id = None;
+                    }
+
+                    if ui.button(egui::RichText::new("Reset").size(8.5)).clicked() {
+                        self.hub.set_custom_name(&session.session_id, "");
+                        self.editing_session_id = None;
+                    }
+
+                    if ui.button(egui::RichText::new("✕").size(8.5)).clicked() {
+                        self.editing_session_id = None;
+                    }
+                });
+            });
         }
     }
 }
@@ -473,7 +528,7 @@ impl eframe::App for AgentDeckApp {
 
                         ui.colored_label(
                             Color32::from_rgb(50, 75, 60),
-                            egui::RichText::new("Click to Ack • Drag corner to resize").monospace().size(8.0),
+                            egui::RichText::new("✎ Rename • Click to Ack • Drag corner to resize").monospace().size(8.0),
                         );
                     });
                 });

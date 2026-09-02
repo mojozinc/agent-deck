@@ -1,5 +1,8 @@
-use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +79,58 @@ impl AttentionState {
     }
 }
 
+/// Persists user-defined custom friendly session names to disk
+#[derive(Clone, Debug)]
+pub struct CustomTitlesStorage {
+    file_path: PathBuf,
+    pub titles: HashMap<String, String>,
+}
+
+impl CustomTitlesStorage {
+    pub fn load() -> Self {
+        let dir = if let Ok(appdata) = std::env::var("APPDATA") {
+            PathBuf::from(appdata).join("agent-deck")
+        } else {
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".agent-deck")
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("session_titles.json");
+
+        let titles = if file_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                serde_json::from_str::<HashMap<String, String>>(&content).unwrap_or_default()
+            } else {
+                HashMap::new()
+            }
+        } else {
+            HashMap::new()
+        };
+
+        Self { file_path, titles }
+    }
+
+    pub fn set_title(&mut self, session_id: &str, custom_title: &str) {
+        let trimmed = custom_title.trim();
+        if trimmed.is_empty() {
+            self.titles.remove(session_id);
+        } else {
+            self.titles.insert(session_id.to_string(), trimmed.to_string());
+        }
+        self.save();
+    }
+
+    pub fn get_title(&self, session_id: &str) -> Option<String> {
+        self.titles.get(session_id).cloned()
+    }
+
+    fn save(&self) {
+        if let Ok(json) = serde_json::to_string_pretty(&self.titles) {
+            let _ = std::fs::write(&self.file_path, json);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ActiveSession {
     pub session_id: String,
@@ -96,17 +151,19 @@ pub struct SessionHub {
     pub rx: Receiver<SessionEvent>,
     pub tx: Sender<SessionEvent>,
     pub selected_tab_idx: usize,
+    pub custom_titles: Arc<RwLock<CustomTitlesStorage>>,
 }
 
 impl SessionHub {
-    pub fn new() -> Self {
+    pub fn new(custom_titles: Arc<RwLock<CustomTitlesStorage>>) -> Self {
         let (tx, rx) = channel::<SessionEvent>();
 
         Self {
-            sessions: Vec::new(),
+            sessions: Vec::new>,
             rx,
             tx,
             selected_tab_idx: 0,
+            custom_titles,
         }
     }
 
@@ -116,9 +173,17 @@ impl SessionHub {
 
     /// Ingests all pending events from active stream adapters
     pub fn poll_events(&mut self) {
+        let titles_guard = self.custom_titles.read().ok();
+
         while let Ok(event) = self.rx.try_recv() {
+            let display_name = if let Some(ref storage) = titles_guard {
+                storage.get_title(&event.session_id).unwrap_or(event.display_name)
+            } else {
+                event.display_name
+            };
+
             if let Some(existing) = self.sessions.iter_mut().find(|s| s.session_id == event.session_id) {
-                existing.display_name = event.display_name;
+                existing.display_name = display_name;
                 existing.agent_type = event.agent_type;
                 existing.attention.update(&event.state, event.step_count);
                 existing.state = event.state;
@@ -132,7 +197,7 @@ impl SessionHub {
 
                 self.sessions.push(ActiveSession {
                     session_id: event.session_id,
-                    display_name: event.display_name,
+                    display_name,
                     agent_type: event.agent_type,
                     state: event.state,
                     status_text: event.status_text,
@@ -143,6 +208,20 @@ impl SessionHub {
                     vu_levels: [0.0; 8],
                     attention,
                 });
+            }
+        }
+    }
+
+    /// Overrides a session friendly name and persists it
+    pub fn set_custom_name(&mut self, session_id: &str, custom_name: &str) {
+        if let Ok(mut storage) = self.custom_titles.write() {
+            storage.set_title(session_id, custom_name);
+        }
+
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.session_id == session_id) {
+            let trimmed = custom_name.trim();
+            if !trimmed.is_empty() {
+                session.display_name = trimmed.to_string();
             }
         }
     }
