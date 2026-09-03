@@ -1,4 +1,4 @@
-﻿#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
@@ -483,7 +483,7 @@ impl eframe::App for AgentDeckApp {
 
             if !self.is_compact_mode {
                 let current_cat = active_categories.get(self.hub.selected_tab_idx).cloned().unwrap_or(active_categories[0].clone());
-                let matching_sessions = self.hub.sessions_for_category(&current_cat);
+                let matching_ids: Vec<String> = self.hub.sessions_for_category(&current_cat).iter().map(|s| s.session_id.clone()).collect();
 
                 let dt = dt;
                 let pulse_phase = self.pulse_phase;
@@ -493,7 +493,7 @@ impl eframe::App for AgentDeckApp {
                     .max_height(available_h)
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        if matching_sessions.is_empty() {
+                        if matching_ids.is_empty() {
                             ui.add_space(15.0);
                             ui.vertical_centered(|ui| {
                                 ui.colored_label(
@@ -502,7 +502,6 @@ impl eframe::App for AgentDeckApp {
                                 );
                             });
                         } else {
-                            let mut matching_ids: Vec<String> = matching_sessions.iter().map(|s| s.session_id.clone()).collect();
                             for session_id in matching_ids {
                                 if let Some(idx) = self.hub.sessions.iter().position(|s| s.session_id == session_id) {
                                     let mut session = self.hub.sessions[idx].clone();
