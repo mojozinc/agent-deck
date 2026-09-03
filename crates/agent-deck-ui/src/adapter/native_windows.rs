@@ -31,7 +31,6 @@ fn extract_earliest_markdown_heading(brain_session_dir: &Path) -> Option<String>
             }
         }
 
-        // Sort by earliest file first
         md_files.sort_by(|a, b| a.1.cmp(&b.1));
 
         for (md_path, _) in md_files {
@@ -41,7 +40,6 @@ fn extract_earliest_markdown_heading(brain_session_dir: &Path) -> Option<String>
                     let trimmed = line.trim();
                     if trimmed.starts_with("# ") {
                         let header_content = trimmed.trim_start_matches("# ").trim();
-                        // Clean up markdown markers or colons
                         let clean = header_content
                             .trim_start_matches("Implementation Plan:")
                             .trim_start_matches("Plan:")
@@ -73,7 +71,6 @@ fn extract_workdir_basename(transcript_path: &Path) -> Option<String> {
         let reader = BufReader::new(file);
         for line in reader.lines().flatten().take(12) {
             if let Ok(json) = serde_json::from_str::<Value>(&line) {
-                // Check in content for <user_information> with workspace paths
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
                     if let Some(pos) = content.find("workbench") {
                         let slice = &content[pos..pos + 80.min(content.len() - pos)];
@@ -89,7 +86,6 @@ fn extract_workdir_basename(transcript_path: &Path) -> Option<String> {
                     }
                 }
 
-                // Check in tool_calls for Cwd / SearchPath
                 if let Some(tool_calls) = json.get("tool_calls").and_then(|v| v.as_array()) {
                     for tool in tool_calls {
                         if let Some(args) = tool.get("args") {
@@ -195,7 +191,6 @@ impl StreamAdapter for NativeWindowsAdapter {
                                 if transcript_path.exists() {
                                     if let Ok(meta) = std::fs::metadata(&transcript_path) {
                                         if let Ok(modified) = meta.modified() {
-                                            // Consider active sessions from the last 48 hours
                                             if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
                                                 if elapsed < Duration::from_secs(48 * 3600) {
                                                     candidate_sessions.push((session_dir, transcript_path, session_id, modified));
@@ -208,28 +203,30 @@ impl StreamAdapter for NativeWindowsAdapter {
                         }
                     }
 
-                    // Sort candidates by most recently modified
                     candidate_sessions.sort_by(|a, b| b.3.cmp(&a.3));
 
-                    // Process ALL active / recent sessions simultaneously
                     for (session_dir, transcript_path, session_id, _) in candidate_sessions {
                         let last_pos = watched_files.get(&transcript_path).copied().unwrap_or(0);
 
-                        // Resolve meaningful session topic/title using priority hierarchy
-                        let title = session_titles.entry(transcript_path.clone()).or_insert_with(|| {
-                            // 1. Heading #1 in earliest markdown file in brain dir
-                            if let Some(heading) = extract_earliest_markdown_heading(&session_dir) {
+                        // Resolve or dynamically upgrade title if previously a placeholder
+                        let current_title = session_titles.get(&transcript_path).cloned();
+                        let is_placeholder = current_title.as_ref().map_or(true, |t| t.starts_with("Session "));
+
+                        let title = if is_placeholder {
+                            let upgraded = if let Some(heading) = extract_earliest_markdown_heading(&session_dir) {
                                 heading
-                            // 2. Workdir basename
                             } else if let Some(workdir) = extract_workdir_basename(&transcript_path) {
                                 workdir
-                            // 3. First user prompt / UUID
                             } else if let Some(prompt) = extract_prompt_fallback(&transcript_path) {
                                 prompt
                             } else {
                                 format!("Session {}", &session_id[..6.min(session_id.len())])
-                            }
-                        });
+                            };
+                            session_titles.insert(transcript_path.clone(), upgraded.clone());
+                            upgraded
+                        } else {
+                            current_title.unwrap()
+                        };
 
                         if let Ok(mut file) = File::open(&transcript_path) {
                             let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -272,13 +269,23 @@ impl StreamAdapter for NativeWindowsAdapter {
                                                     .and_then(|s| s.as_str())
                                                     .unwrap_or("");
 
-                                                (
-                                                    AgentState::RunningTool {
-                                                        name: tool_name.to_string(),
-                                                        summary: tool_summary.to_string(),
-                                                    },
-                                                    format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
-                                                )
+                                                if tool_name == "ask_question" {
+                                                    (
+                                                        AgentState::WaitingForApproval {
+                                                            name: tool_name.to_string(),
+                                                            summary: tool_summary.to_string(),
+                                                        },
+                                                        format!("APPROVAL REQUIRED: {}", tool_summary),
+                                                    )
+                                                } else {
+                                                    (
+                                                        AgentState::RunningTool {
+                                                            name: tool_name.to_string(),
+                                                            summary: tool_summary.to_string(),
+                                                        },
+                                                        format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
+                                                    )
+                                                }
                                             } else {
                                                 (AgentState::Thinking, "THINKING • REASONING...".to_string())
                                             }
@@ -296,7 +303,7 @@ impl StreamAdapter for NativeWindowsAdapter {
                                                 AgentState::WaitingForInput {
                                                     prompt_preview: "Ready for input".to_string(),
                                                 },
-                                                "INPUT REQUIRED: Waiting for user prompt".to_string(),
+                                                "WAITING FOR PROMPT".to_string(),
                                             )
                                         } else {
                                             (AgentState::Thinking, format!("STEP #{}: {}", step_index, step_type))

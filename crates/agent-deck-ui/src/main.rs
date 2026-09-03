@@ -9,12 +9,65 @@ use adapter::StreamAdapter;
 use agent_deck_core::AgentState;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
-use hub::{ActiveSession, CustomTitlesStorage, DynamicCategory, SessionHub};
+use hub::{ActiveSession, CustomTitlesStorage, DynamicCategory, SessionHub, UserAction};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.clamp(0.0, 1.0)
+}
+
+fn setup_crash_logging() {
+    let log_dir = if let Ok(appdata) = std::env::var("APPDATA") {
+        std::path::PathBuf::from(appdata).join("agent-deck")
+    } else {
+        std::path::PathBuf::from(".")
+    };
+    let _ = std::fs::create_dir_all(&log_dir);
+    let crash_log_path = log_dir.join("crash.log");
+    let run_log_path = log_dir.join("agent-deck.log");
+
+    let startup_msg = format!(
+        "[{}] Agent Deck UI starting up (PID: {})\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        std::process::id()
+    );
+    let _ = std::fs::write(&run_log_path, startup_msg);
+
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let payload = panic_info.payload();
+        let message = if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        let backtrace = std::backtrace::Backtrace::capture();
+
+        let report = format!(
+            "=======================================================\n\
+             AGENT DECK CRASH REPORT - {}\n\
+             =======================================================\n\
+             Location: {}\n\
+             Message:  {}\n\
+             \n\
+             Backtrace:\n\
+             {}\n\
+             =======================================================\n\n",
+            timestamp, location, message, backtrace
+        );
+
+        let _ = std::fs::write(&crash_log_path, &report);
+        let _ = std::fs::write("agent-deck-crash.log", &report);
+    }));
 }
 
 pub struct AgentDeckApp {
@@ -64,10 +117,12 @@ impl AgentDeckApp {
         session: &mut ActiveSession,
         dt: f32,
         pulse_phase: f32,
+        actions: &mut Vec<UserAction>,
     ) {
         let scale = self.font_scale;
         let is_active = matches!(session.state, AgentState::Thinking | AgentState::RunningTool { .. });
-        let is_waiting = matches!(session.state, AgentState::WaitingForInput { .. });
+        let is_waiting_input = matches!(session.state, AgentState::WaitingForInput { .. });
+        let is_waiting_approval = matches!(session.state, AgentState::WaitingForApproval { .. });
         let is_stale = session.is_stale();
         let should_pulse = session.attention.is_pulsating(&session.state);
         let is_editing = self.editing_session_id.as_deref() == Some(&session.session_id);
@@ -80,7 +135,7 @@ impl AgentDeckApp {
                 let wave = ((pulse_phase * 2.8 + i as f32 * 0.6).sin() * 0.5 + 0.5)
                     * ((pulse_phase * 1.1 + (8 - i) as f32 * 0.4).cos() * 0.4 + 0.6);
                 *bar = lerp(*bar, wave, dt * 12.0);
-            } else if is_waiting {
+            } else if is_waiting_input || is_waiting_approval {
                 *bar = lerp(*bar, 0.0, dt * 6.0);
             } else {
                 *bar = lerp(*bar, 0.05, dt * 4.0);
@@ -88,7 +143,7 @@ impl AgentDeckApp {
         }
 
         // Marquee scroll only when actively running/thinking
-        if !is_waiting && !is_stale {
+        if is_active && !is_stale {
             session.marquee_offset += dt * 38.0;
         } else {
             session.marquee_offset = 0.0;
@@ -103,7 +158,7 @@ impl AgentDeckApp {
         let response = ui.interact(row_rect, ui.id().with(&session.session_id), egui::Sense::click());
         if response.clicked() {
             self.selected_session_id = Some(session.session_id.clone());
-            session.attention.acknowledge();
+            actions.push(UserAction::Select(session.session_id.clone()));
         }
 
         let painter = ui.painter_at(row_rect);
@@ -123,14 +178,24 @@ impl AgentDeckApp {
             Color32::from_rgb(0, 220, 140)
         } else if should_pulse {
             let breathe = (pulse_phase * 1.5).sin() * 0.5 + 0.5;
-            Color32::from_rgb(
-                lerp(140.0, 255.0, breathe) as u8,
-                lerp(100.0, 205.0, breathe) as u8,
-                lerp(15.0, 25.0, breathe) as u8,
-            )
+            if is_waiting_approval {
+                Color32::from_rgb(
+                    lerp(180.0, 255.0, breathe) as u8,
+                    lerp(120.0, 180.0, breathe) as u8,
+                    lerp(20.0, 40.0, breathe) as u8,
+                )
+            } else {
+                Color32::from_rgb(
+                    lerp(140.0, 255.0, breathe) as u8,
+                    lerp(100.0, 205.0, breathe) as u8,
+                    lerp(15.0, 25.0, breathe) as u8,
+                )
+            }
         } else if is_stale {
             Color32::from_rgb(45, 40, 35)
-        } else if is_waiting {
+        } else if is_waiting_approval {
+            Color32::from_rgb(255, 160, 30)
+        } else if is_waiting_input {
             Color32::from_rgb(180, 140, 20)
         } else if response.hovered() {
             Color32::from_rgb(45, 75, 55)
@@ -157,7 +222,8 @@ impl AgentDeckApp {
             match &session.state {
                 AgentState::Thinking => ("THINKING", Color32::from_rgb(0, 255, 128)),
                 AgentState::RunningTool { name, .. } => (name.as_str(), Color32::from_rgb(50, 255, 100)),
-                AgentState::WaitingForInput { .. } => ("INPUT REQUIRED", Color32::from_rgb(255, 205, 20)),
+                AgentState::WaitingForApproval { .. } => ("APPROVAL REQUIRED", Color32::from_rgb(255, 160, 30)),
+                AgentState::WaitingForInput { .. } => ("WAITING FOR PROMPT", Color32::from_rgb(255, 205, 20)),
                 AgentState::Error { .. } => ("ERROR", Color32::from_rgb(255, 70, 70)),
                 AgentState::Finished => ("FINISHED", Color32::from_rgb(0, 220, 255)),
                 AgentState::Idle => ("IDLE", Color32::from_rgb(90, 130, 110)),
@@ -170,7 +236,7 @@ impl AgentDeckApp {
             breathe.clamp(0.2, 1.0)
         } else if is_stale {
             0.4
-        } else if is_waiting {
+        } else if is_waiting_approval || is_waiting_input {
             0.85
         } else if is_active {
             ((pulse_phase * 2.2).sin() * 0.25 + 0.75).clamp(0.2, 1.0)
@@ -253,12 +319,12 @@ impl AgentDeckApp {
             };
             painter.text(dismiss_pill_rect.min, egui::Align2::LEFT_TOP, "[DISMISS]", FontId::monospace(9.0 * scale), pill_col);
             if dismiss_pill_resp.clicked() {
-                self.hub.dismiss_session(&session.session_id);
+                actions.push(UserAction::Dismiss(session.session_id.clone()));
             }
             next_x += 60.0 * scale;
         }
 
-        let state_x = (next_x + 6.0).min(row_rect.max.x - 180.0);
+        let state_x = (next_x + 6.0).min(row_rect.max.x - 190.0);
         if state_x > next_x + 4.0 {
             painter.text(
                 pos2(state_x, header_y),
@@ -269,6 +335,7 @@ impl AgentDeckApp {
             );
         }
 
+        // Step Counter (Safely positioned with zero overlap)
         painter.text(
             pos2(row_rect.max.x - 84.0, header_y),
             egui::Align2::RIGHT_TOP,
@@ -287,7 +354,7 @@ impl AgentDeckApp {
         };
         painter.text(close_btn_rect.min, egui::Align2::LEFT_TOP, "✕", FontId::monospace(9.0 * scale), close_col);
         if close_btn_resp.clicked() {
-            self.hub.dismiss_session(&session.session_id);
+            actions.push(UserAction::Dismiss(session.session_id.clone()));
         }
 
         // 3. Line 2: Status Text Display
@@ -299,9 +366,12 @@ impl AgentDeckApp {
 
         let text_color = if is_stale {
             Color32::from_rgb(160, 150, 130)
+        } else if is_waiting_approval {
+            Color32::from_rgb(255, 180, 60)
+        } else if is_waiting_input {
+            Color32::from_rgb(255, 215, 60)
         } else {
             match &session.state {
-                AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 215, 60),
                 AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
                 AgentState::Finished => Color32::from_rgb(100, 220, 255),
                 _ => Color32::from_rgb(40, 255, 120),
@@ -314,7 +384,7 @@ impl AgentDeckApp {
         let prev_clip = row_painter.clip_rect();
         row_painter.set_clip_rect(marquee_area);
 
-        if is_waiting || is_stale {
+        if is_waiting_input || is_waiting_approval || is_stale {
             let status_line = if is_stale {
                 format!("(Inactive > 15m) {}", session.status_text)
             } else {
@@ -392,13 +462,13 @@ impl AgentDeckApp {
                         let new_name = self.edit_text_buffer.trim().to_string();
                         if !new_name.is_empty() {
                             session.display_name = new_name.clone();
-                            self.hub.set_custom_name(&session.session_id, &new_name);
+                            actions.push(UserAction::Rename(session.session_id.clone(), new_name));
                         }
                         self.editing_session_id = None;
                     }
 
                     if ui.button(egui::RichText::new("Reset").size(9.5 * scale)).clicked() {
-                        self.hub.set_custom_name(&session.session_id, "");
+                        actions.push(UserAction::Rename(session.session_id.clone(), "".to_string()));
                         self.editing_session_id = None;
                     }
 
@@ -421,9 +491,11 @@ impl eframe::App for AgentDeckApp {
         self.pulse_phase += dt * 4.0;
         let scale = self.font_scale;
 
+        let mut frame_actions: Vec<UserAction> = Vec::new();
+
         // Clear all unacknowledged notification pulses whenever user clicks anywhere on the window
         if ctx.input(|i| i.pointer.any_click() || i.pointer.any_pressed()) {
-            self.hub.acknowledge_all();
+            frame_actions.push(UserAction::AcknowledgeAll);
         }
 
         // Ingest stream updates
@@ -560,7 +632,7 @@ impl eframe::App for AgentDeckApp {
 
                     if ui.add(btn).clicked() {
                         self.hub.selected_tab_idx = tab_idx;
-                        self.hub.acknowledge_category(cat);
+                        frame_actions.push(UserAction::AcknowledgeCategory(cat.id.clone()));
                     }
                 }
             });
@@ -598,8 +670,7 @@ impl eframe::App for AgentDeckApp {
                                         }
                                     }
 
-                                    self.render_session_row(ui, &mut session, dt, pulse_phase);
-                                    self.hub.sessions[idx] = session;
+                                    self.render_session_row(ui, &mut session, dt, pulse_phase, &mut frame_actions);
                                     ui.add_space(3.0);
                                 }
                             }
@@ -610,11 +681,11 @@ impl eframe::App for AgentDeckApp {
 
                 // Bottom Global Status Bar
                 let total_sessions = self.hub.sessions.len();
-                let total_waiting = self.hub.sessions.iter().filter(|s| matches!(s.state, AgentState::WaitingForInput { .. })).count();
+                let total_waiting = self.hub.sessions.iter().filter(|s| matches!(s.state, AgentState::WaitingForInput { .. } | AgentState::WaitingForApproval { .. })).count();
 
                 ui.horizontal(|ui| {
                     let status_msg = if total_waiting > 0 {
-                        format!("* {} active • {} requiring input", total_sessions, total_waiting)
+                        format!("* {} active • {} requiring input/approval", total_sessions, total_waiting)
                     } else {
                         format!("o {} active sessions monitored", total_sessions)
                     };
@@ -654,10 +725,15 @@ impl eframe::App for AgentDeckApp {
                 });
             }
         });
+
+        // Pass 2: Apply all queued user actions cleanly outside render loops
+        self.hub.apply_actions(frame_actions);
     }
 }
 
 fn main() -> eframe::Result<()> {
+    setup_crash_logging();
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([580.0, 260.0])

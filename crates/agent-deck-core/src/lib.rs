@@ -1,4 +1,4 @@
-﻿use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -6,6 +6,7 @@ pub enum AgentState {
     Idle,
     Thinking,
     RunningTool { name: String, summary: String },
+    WaitingForApproval { name: String, summary: String },
     WaitingForInput { prompt_preview: String },
     Error { message: String },
     Finished,

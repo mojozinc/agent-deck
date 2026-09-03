@@ -13,6 +13,15 @@ pub struct DynamicCategory {
     pub session_count: usize,
 }
 
+#[derive(Clone, Debug)]
+pub enum UserAction {
+    Dismiss(String),
+    Rename(String, String),
+    Select(String),
+    AcknowledgeCategory(String),
+    AcknowledgeAll,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttentionState {
     pub is_unacknowledged: bool,
@@ -32,6 +41,7 @@ impl AttentionState {
     /// Updates the attention tracker with a new state.
     pub fn update(&mut self, state: &AgentState, step_count: u32) {
         let sig = match state {
+            AgentState::WaitingForApproval { name, summary } => format!("approval:{}:{}:{}", step_count, name, summary),
             AgentState::WaitingForInput { prompt_preview } => format!("waiting:{}:{}", step_count, prompt_preview),
             AgentState::RunningTool { name, .. } => format!("tool:{}:{}", step_count, name),
             AgentState::Thinking => format!("thinking:{}", step_count),
@@ -41,12 +51,12 @@ impl AttentionState {
         };
 
         if self.last_state_signature != sig {
-            let is_transition_to_waiting = !self.last_state_signature.is_empty()
-                && matches!(state, AgentState::WaitingForInput { .. });
+            let is_transition_to_attention = !self.last_state_signature.is_empty()
+                && matches!(state, AgentState::WaitingForInput { .. } | AgentState::WaitingForApproval { .. });
 
             self.last_state_signature = sig;
 
-            if is_transition_to_waiting {
+            if is_transition_to_attention {
                 self.is_unacknowledged = true;
                 self.triggered_at = Some(Instant::now());
             } else {
@@ -63,7 +73,7 @@ impl AttentionState {
 
     /// Returns true if actively pulsating smoothly (stops automatically after 4 seconds)
     pub fn is_pulsating(&self, state: &AgentState) -> bool {
-        if !matches!(state, AgentState::WaitingForInput { .. }) || !self.is_unacknowledged {
+        if !matches!(state, AgentState::WaitingForInput { .. } | AgentState::WaitingForApproval { .. }) || !self.is_unacknowledged {
             return false;
         }
 
@@ -255,30 +265,52 @@ impl SessionHub {
         }
     }
 
-    /// Manually dismisses a session from the deck view
-    pub fn dismiss_session(&mut self, session_id: &str) {
-        self.dismissed_sessions.insert(session_id.to_string());
-        self.sessions.retain(|s| s.session_id != session_id);
-    }
-
-    /// Acknowledges all active notifications across all sessions and bridges
-    pub fn acknowledge_all(&mut self) {
-        for s in self.sessions.iter_mut() {
-            s.attention.acknowledge();
-        }
-        self.last_bridge_connected_at = None;
-    }
-
-    /// Overrides a session friendly name and persists it
-    pub fn set_custom_name(&mut self, session_id: &str, custom_name: &str) {
-        if let Ok(mut storage) = self.custom_titles.write() {
-            storage.set_title(session_id, custom_name);
-        }
-
-        if let Some(session) = self.sessions.iter_mut().find(|s| s.session_id == session_id) {
-            let trimmed = custom_name.trim();
-            if !trimmed.is_empty() {
-                session.display_name = trimmed.to_string();
+    /// Two-Pass Action Queue: Applies user actions safely outside render loops
+    pub fn apply_actions(&mut self, actions: Vec<UserAction>) {
+        for action in actions {
+            match action {
+                UserAction::Dismiss(session_id) => {
+                    self.dismissed_sessions.insert(session_id.clone());
+                    self.sessions.retain(|s| s.session_id != session_id);
+                }
+                UserAction::Rename(session_id, new_name) => {
+                    if let Ok(mut storage) = self.custom_titles.write() {
+                        storage.set_title(&session_id, &new_name);
+                    }
+                    if let Some(session) = self.sessions.iter_mut().find(|s| s.session_id == session_id) {
+                        let trimmed = new_name.trim();
+                        if !trimmed.is_empty() {
+                            session.display_name = trimmed.to_string();
+                        }
+                    }
+                }
+                UserAction::Select(session_id) => {
+                    if let Some(s) = self.sessions.iter_mut().find(|s| s.session_id == session_id) {
+                        s.attention.acknowledge();
+                    }
+                }
+                UserAction::AcknowledgeCategory(cat_id) => {
+                    if cat_id == "windows" {
+                        for s in self.sessions.iter_mut() {
+                            if s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-") {
+                                s.attention.acknowledge();
+                            }
+                        }
+                    } else if let Some(target_host) = cat_id.strip_prefix("host:") {
+                        for s in self.sessions.iter_mut() {
+                            let host_clean = s.metadata.host.strip_prefix("wsl:").unwrap_or(&s.metadata.host);
+                            if host_clean.eq_ignore_ascii_case(target_host) {
+                                s.attention.acknowledge();
+                            }
+                        }
+                    }
+                }
+                UserAction::AcknowledgeAll => {
+                    for s in self.sessions.iter_mut() {
+                        s.attention.acknowledge();
+                    }
+                    self.last_bridge_connected_at = None;
+                }
             }
         }
     }
@@ -374,31 +406,13 @@ impl SessionHub {
         }
     }
 
-    /// Checks if any session in the given list requires user input
+    /// Checks if any session in the given list requires user input or approval
     pub fn has_waiting_input(sessions: &[&ActiveSession]) -> bool {
-        sessions.iter().any(|s| matches!(s.state, AgentState::WaitingForInput { .. }))
+        sessions.iter().any(|s| matches!(s.state, AgentState::WaitingForInput { .. } | AgentState::WaitingForApproval { .. }))
     }
 
     /// Checks if any session in the given list has an unacknowledged active alert that is still pulsating
     pub fn has_unacknowledged_input(sessions: &[&ActiveSession]) -> bool {
         sessions.iter().any(|s| s.attention.is_pulsating(&s.state))
-    }
-
-    /// Acknowledges all sessions in a given category
-    pub fn acknowledge_category(&mut self, cat: &DynamicCategory) {
-        if cat.id == "windows" {
-            for s in self.sessions.iter_mut() {
-                if s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-") {
-                    s.attention.acknowledge();
-                }
-            }
-        } else if let Some(target_host) = cat.id.strip_prefix("host:") {
-            for s in self.sessions.iter_mut() {
-                let host_clean = s.metadata.host.strip_prefix("wsl:").unwrap_or(&s.metadata.host);
-                if host_clean.eq_ignore_ascii_case(target_host) {
-                    s.attention.acknowledge();
-                }
-            }
-        }
     }
 }

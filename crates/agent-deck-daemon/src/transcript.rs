@@ -218,13 +218,23 @@ impl TranscriptWatcher {
                     .and_then(|s| s.as_str())
                     .unwrap_or("");
 
-                (
-                    AgentState::RunningTool {
-                        name: tool_name.to_string(),
-                        summary: tool_summary.to_string(),
-                    },
-                    format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
-                )
+                if tool_name == "ask_question" {
+                    (
+                        AgentState::WaitingForApproval {
+                            name: tool_name.to_string(),
+                            summary: tool_summary.to_string(),
+                        },
+                        format!("APPROVAL REQUIRED: {}", tool_summary),
+                    )
+                } else {
+                    (
+                        AgentState::RunningTool {
+                            name: tool_name.to_string(),
+                            summary: tool_summary.to_string(),
+                        },
+                        format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
+                    )
+                }
             } else {
                 (AgentState::Thinking, "THINKING • REASONING...".to_string())
             }
@@ -242,7 +252,7 @@ impl TranscriptWatcher {
                 AgentState::WaitingForInput {
                     prompt_preview: "Ready for input".to_string(),
                 },
-                "INPUT REQUIRED: Waiting for user prompt".to_string(),
+                "WAITING FOR PROMPT".to_string(),
             )
         } else {
             (AgentState::Thinking, format!("STEP #{}: {}", step_index, step_type))
@@ -259,19 +269,26 @@ impl TranscriptWatcher {
             pid: None,
         };
 
-        let title = self.session_titles.entry(path.to_path_buf()).or_insert_with(|| {
-            if let Some(heading) = extract_earliest_markdown_heading(session_dir) {
+        let current_title = self.session_titles.get(path).cloned();
+        let is_placeholder = current_title.as_ref().map_or(true, |t| t.starts_with("Session "));
+
+        let title = if is_placeholder {
+            let upgraded = if let Some(heading) = extract_earliest_markdown_heading(session_dir) {
                 heading
             } else if let Some(workdir) = extract_workdir_basename(path) {
                 workdir
             } else {
                 format!("Session {}", &session_id[..6.min(session_id.len())])
-            }
-        });
+            };
+            self.session_titles.insert(path.to_path_buf(), upgraded.clone());
+            upgraded
+        } else {
+            current_title.unwrap()
+        };
 
         let event = SessionEvent::new(
             format!("wsl-{}-{}", self.distro_name, session_id),
-            title.clone(),
+            title,
             "Gemini",
             state,
             status_text,
