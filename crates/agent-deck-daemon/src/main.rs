@@ -1,33 +1,66 @@
 ﻿mod tmux;
 mod transcript;
 
-use agent_deck_core::SessionEvent;
+use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex};
 use transcript::TranscriptWatcher;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🎛️ Agent Deck WSL2 Bridge Daemon v0.1 starting...");
+    let distro = std::env::var("WSL_DISTRO_NAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "clibox".to_string());
+
+    println!("🎛️ Agent Deck WSL2 Bridge Daemon v0.1 starting for [{}]...", distro);
     let bind_addr: SocketAddr = "0.0.0.0:8765".parse()?;
     let listener = TcpListener::bind(bind_addr).await?;
     println!("📡 Listening for Windows Deck UI connections on {}", bind_addr);
 
     let (tx, _rx) = broadcast::channel::<String>(100);
     let tx_broadcast = tx.clone();
+    let watcher_mutex = Arc::new(Mutex::new(TranscriptWatcher::new()));
+    let watcher_bg = watcher_mutex.clone();
+    let distro_bg = distro.clone();
 
     // 1. Background Scanner Thread (polling transcripts & tmux)
     tokio::spawn(async move {
-        let mut watcher = TranscriptWatcher::new();
+        let mut heartbeat_tick: u32 = 0;
         loop {
             tokio::time::sleep(Duration::from_millis(400)).await;
+            heartbeat_tick += 1;
+
+            let mut watcher = watcher_bg.lock().await;
             let events = watcher.scan_and_collect_events();
             for event in events {
                 if let Ok(json) = serde_json::to_string(&event) {
+                    let _ = tx_broadcast.send(json);
+                }
+            }
+
+            // Periodic Bridge Heartbeat (every ~3 seconds) to keep UI connection status fresh
+            if heartbeat_tick % 8 == 0 {
+                let hb_event = SessionEvent::new(
+                    format!("wsl-bridge-{}", distro_bg),
+                    format!("WSL Bridge [{}]", distro_bg),
+                    "Bridge",
+                    AgentState::Idle,
+                    format!("WSL2 bridge online ({})", distro_bg),
+                    0,
+                    SessionMetadata {
+                        host: format!("wsl:{}", distro_bg),
+                        tmux_session: None,
+                        tmux_window: None,
+                        tmux_pane: None,
+                        cwd: None,
+                        pid: None,
+                    },
+                );
+                if let Ok(json) = serde_json::to_string(&hb_event) {
                     let _ = tx_broadcast.send(json);
                 }
             }
@@ -39,9 +72,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (socket, client_addr) = listener.accept().await?;
         println!("🔌 Windows Agent Deck connected from: {}", client_addr);
         let mut rx = tx.subscribe();
+        let (_reader, mut writer) = socket.into_split();
+        let distro_conn = distro.clone();
+        let watcher_conn = watcher_mutex.clone();
 
         tokio::spawn(async move {
-            let (mut reader, mut writer) = socket.into_split();
+            // Send immediate handshake on connect
+            let handshake = SessionEvent::new(
+                format!("wsl-bridge-{}", distro_conn),
+                format!("WSL Bridge [{}]", distro_conn),
+                "Bridge",
+                AgentState::Idle,
+                format!("Connected to {}", distro_conn),
+                0,
+                SessionMetadata {
+                    host: format!("wsl:{}", distro_conn),
+                    tmux_session: None,
+                    tmux_window: None,
+                    tmux_pane: None,
+                    cwd: None,
+                    pid: None,
+                },
+            );
+
+            if let Ok(json) = serde_json::to_string(&handshake) {
+                let payload = format!("{}\n", json);
+                let _ = writer.write_all(payload.as_bytes()).await;
+            }
+
+            // Immediately scan and send active events on connect
+            {
+                let mut watcher = watcher_conn.lock().await;
+                let events = watcher.scan_and_collect_events();
+                for event in events {
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        let payload = format!("{}\n", json);
+                        let _ = writer.write_all(payload.as_bytes()).await;
+                    }
+                }
+            }
+
+            // Forward live broadcast stream
             while let Ok(msg) = rx.recv().await {
                 let payload = format!("{}\n", msg);
                 if let Err(e) = writer.write_all(payload.as_bytes()).await {
@@ -52,4 +123,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 }
-

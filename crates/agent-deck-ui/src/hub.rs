@@ -137,6 +137,8 @@ pub struct SessionHub {
     pub tx: Sender<SessionEvent>,
     pub selected_tab_idx: usize,
     pub custom_titles: Arc<RwLock<CustomTitlesStorage>>,
+    pub connected_bridges: HashMap<String, Instant>, // Distro -> Last Heartbeat
+    pub last_bridge_connected_at: Option<Instant>,
 }
 
 impl SessionHub {
@@ -149,6 +151,8 @@ impl SessionHub {
             tx,
             selected_tab_idx: 0,
             custom_titles,
+            connected_bridges: HashMap::new(),
+            last_bridge_connected_at: None,
         }
     }
 
@@ -161,6 +165,29 @@ impl SessionHub {
         let titles_guard = self.custom_titles.read().ok();
 
         while let Ok(event) = self.rx.try_recv() {
+            // Check for bridge handshake / heartbeat events
+            if event.agent_type == "Bridge" {
+                let distro = event
+                    .metadata
+                    .host
+                    .strip_prefix("wsl:")
+                    .unwrap_or(&event.metadata.host)
+                    .to_string();
+
+                let is_new = self
+                    .connected_bridges
+                    .get(&distro)
+                    .map(|last| last.elapsed().as_secs() > 8)
+                    .unwrap_or(true);
+
+                if is_new {
+                    self.last_bridge_connected_at = Some(Instant::now());
+                }
+
+                self.connected_bridges.insert(distro, Instant::now());
+                continue;
+            }
+
             let display_name = if let Some(ref storage) = titles_guard {
                 storage.get_title(&event.session_id).unwrap_or(event.display_name)
             } else {
@@ -211,10 +238,18 @@ impl SessionHub {
         }
     }
 
+    /// Returns list of active WSL bridge distros
+    pub fn get_active_bridges(&self) -> Vec<String> {
+        self.connected_bridges
+            .iter()
+            .filter(|(_, last)| last.elapsed().as_secs() < 8)
+            .map(|(d, _)| d.clone())
+            .collect()
+    }
+
     /// Dynamically computes active category tabs.
     /// - "Windows" is always permanent.
-    /// - WSL and remote host categories are discovered from active sessions.
-    /// - Any non-permanent category with 0 sessions is automatically filtered out!
+    /// - Active connected WSL distros and discovered host categories are included.
     pub fn active_categories(&self) -> Vec<DynamicCategory> {
         let mut categories = Vec::new();
 
@@ -232,8 +267,17 @@ impl SessionHub {
             session_count: win_sessions.len(),
         });
 
-        // 2. Discover all non-Windows environment hosts from active sessions
+        // 2. Discover all non-Windows environment hosts from active sessions & connected bridges
         let mut discovered_hosts: HashMap<String, usize> = HashMap::new();
+
+        // From connected bridges (even if currently 0 active sessions)
+        for (distro, last) in &self.connected_bridges {
+            if last.elapsed().as_secs() < 8 {
+                discovered_hosts.entry(distro.clone()).or_insert(0);
+            }
+        }
+
+        // From live sessions
         for s in &self.sessions {
             let host_raw = &s.metadata.host;
             let is_win = host_raw.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-");
@@ -254,15 +298,12 @@ impl SessionHub {
         sorted_hosts.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (host_label, count) in sorted_hosts {
-            if count > 0 {
-                // Zero-session auto-filtering!
-                categories.push(DynamicCategory {
-                    id: format!("host:{}", host_label),
-                    label: host_label,
-                    is_permanent: false,
-                    session_count: count,
-                });
-            }
+            categories.push(DynamicCategory {
+                id: format!("host:{}", host_label),
+                label: host_label,
+                is_permanent: false,
+                session_count: count,
+            });
         }
 
         categories

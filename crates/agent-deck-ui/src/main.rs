@@ -406,6 +406,25 @@ impl eframe::App for AgentDeckApp {
                     egui::RichText::new("AGENT-DECK v0.3").strong().size(12.0 * scale),
                 );
 
+                let active_bridges = self.hub.get_active_bridges();
+                if !active_bridges.is_empty() {
+                    let bridge_name = active_bridges.join(", ");
+                    let is_recent_connect = self.hub.last_bridge_connected_at.map(|t| t.elapsed().as_secs_f32() < 4.0).unwrap_or(false);
+                    
+                    let link_col = if is_recent_connect {
+                        let glow = ((self.pulse_phase * 4.0).sin() * 0.4 + 0.6).clamp(0.2, 1.0);
+                        Color32::from_rgb((0.0 * glow) as u8, (255.0 * glow) as u8, (230.0 * glow) as u8)
+                    } else {
+                        Color32::from_rgb(0, 210, 160)
+                    };
+
+                    ui.add_space(6.0);
+                    ui.colored_label(
+                        link_col,
+                        egui::RichText::new(format!("● {} LINKED", bridge_name)).monospace().size(9.0 * scale),
+                    );
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(egui::RichText::new("X").size(10.5 * scale).color(Color32::from_rgb(255, 100, 100))).clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
