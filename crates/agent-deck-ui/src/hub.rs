@@ -5,8 +5,6 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-pub const ENABLE_BLINKING_ALERTS: bool = false; // Feature flag for blinking alerts (turned off)
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct DynamicCategory {
     pub id: String,
@@ -18,13 +16,15 @@ pub struct DynamicCategory {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttentionState {
     pub is_unacknowledged: bool,
+    pub triggered_at: Option<Instant>,
     pub last_state_signature: String,
 }
 
 impl AttentionState {
     pub fn new() -> Self {
         Self {
-            is_unacknowledged: false, // Default false: deck starts calm without blinking
+            is_unacknowledged: false,
+            triggered_at: None,
             last_state_signature: String::new(),
         }
     }
@@ -48,19 +48,31 @@ impl AttentionState {
 
             if is_transition_to_waiting {
                 self.is_unacknowledged = true;
+                self.triggered_at = Some(Instant::now());
             } else {
                 self.is_unacknowledged = false;
+                self.triggered_at = None;
             }
         }
     }
 
     pub fn acknowledge(&mut self) {
         self.is_unacknowledged = false;
+        self.triggered_at = None;
     }
 
-    /// Returns true if this component should actively pulse/blink
-    pub fn should_blink(&self, state: &AgentState) -> bool {
-        ENABLE_BLINKING_ALERTS && matches!(state, AgentState::WaitingForInput { .. }) && self.is_unacknowledged
+    /// Returns true if actively pulsating smoothly (stops automatically after 4 seconds)
+    pub fn is_pulsating(&self, state: &AgentState) -> bool {
+        if !matches!(state, AgentState::WaitingForInput { .. }) || !self.is_unacknowledged {
+            return false;
+        }
+
+        if let Some(triggered) = self.triggered_at {
+            if triggered.elapsed().as_secs_f32() > 4.0 {
+                return false; // Auto-stop pulsating after 4 seconds!
+            }
+        }
+        true
     }
 }
 
@@ -174,13 +186,13 @@ impl SessionHub {
                     .unwrap_or(&event.metadata.host)
                     .to_string();
 
-                let is_new = self
+                let is_first_time = self
                     .connected_bridges
                     .get(&distro)
-                    .map(|last| last.elapsed().as_secs() > 8)
+                    .map(|last| last.elapsed().as_secs() > 10)
                     .unwrap_or(true);
 
-                if is_new {
+                if is_first_time {
                     self.last_bridge_connected_at = Some(Instant::now());
                 }
 
@@ -222,6 +234,14 @@ impl SessionHub {
                 });
             }
         }
+    }
+
+    /// Acknowledges all active notifications across all sessions and bridges
+    pub fn acknowledge_all(&mut self) {
+        for s in self.sessions.iter_mut() {
+            s.attention.acknowledge();
+        }
+        self.last_bridge_connected_at = None;
     }
 
     /// Overrides a session friendly name and persists it
@@ -270,7 +290,7 @@ impl SessionHub {
         // 2. Discover all non-Windows environment hosts from active sessions & connected bridges
         let mut discovered_hosts: HashMap<String, usize> = HashMap::new();
 
-        // From connected bridges (even if currently 0 active sessions)
+        // From connected bridges
         for (distro, last) in &self.connected_bridges {
             if last.elapsed().as_secs() < 8 {
                 discovered_hosts.entry(distro.clone()).or_insert(0);
@@ -334,9 +354,9 @@ impl SessionHub {
         sessions.iter().any(|s| matches!(s.state, AgentState::WaitingForInput { .. }))
     }
 
-    /// Checks if any session in the given list has an unacknowledged active alert
+    /// Checks if any session in the given list has an unacknowledged active alert that is still pulsating
     pub fn has_unacknowledged_input(sessions: &[&ActiveSession]) -> bool {
-        sessions.iter().any(|s| s.attention.should_blink(&s.state))
+        sessions.iter().any(|s| s.attention.is_pulsating(&s.state))
     }
 
     /// Acknowledges all sessions in a given category

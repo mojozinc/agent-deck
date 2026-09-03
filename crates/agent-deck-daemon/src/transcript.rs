@@ -10,6 +10,7 @@ use std::time::SystemTime;
 pub struct TranscriptWatcher {
     watched_sessions: HashMap<PathBuf, u64>, // Path -> Last read byte position
     session_titles: HashMap<PathBuf, String>,
+    latest_sessions: HashMap<String, SessionEvent>, // SessionId -> Latest Event
     brain_dir: PathBuf,
     distro_name: String,
 }
@@ -111,9 +112,15 @@ impl TranscriptWatcher {
         Self {
             watched_sessions: HashMap::new(),
             session_titles: HashMap::new(),
+            latest_sessions: HashMap::new(),
             brain_dir,
             distro_name,
         }
+    }
+
+    /// Returns a snapshot of all currently known active sessions
+    pub fn get_latest_sessions(&self) -> Vec<SessionEvent> {
+        self.latest_sessions.values().cloned().collect()
     }
 
     /// Scans the brain directory for any active transcripts with new events
@@ -140,6 +147,17 @@ impl TranscriptWatcher {
 
                 let transcript_file = session_path.join(".system_generated/logs/transcript.jsonl");
                 if transcript_file.exists() {
+                    // Only process active/recent sessions modified within the last 3 days
+                    if let Ok(meta) = std::fs::metadata(&transcript_file) {
+                        if let Ok(modified) = meta.modified() {
+                            if let Ok(elapsed) = modified.elapsed() {
+                                if elapsed.as_secs() > 86400 * 3 {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(event) = self.check_transcript_file(&session_id, &session_path, &transcript_file) {
                         events.push(event);
                     }
@@ -251,7 +269,7 @@ impl TranscriptWatcher {
             }
         });
 
-        Some(SessionEvent::new(
+        let event = SessionEvent::new(
             format!("wsl-{}-{}", self.distro_name, session_id),
             title.clone(),
             "Gemini",
@@ -259,6 +277,9 @@ impl TranscriptWatcher {
             status_text,
             step_index,
             metadata,
-        ))
+        );
+
+        self.latest_sessions.insert(session_id.to_string(), event.clone());
+        Some(event)
     }
 }

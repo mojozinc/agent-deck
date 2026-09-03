@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+﻿#![windows_subsystem = "windows"]
 
 mod adapter;
 mod hub;
@@ -68,7 +68,7 @@ impl AgentDeckApp {
         let scale = self.font_scale;
         let is_active = matches!(session.state, AgentState::Thinking | AgentState::RunningTool { .. });
         let is_waiting = matches!(session.state, AgentState::WaitingForInput { .. });
-        let should_blink = session.attention.should_blink(&session.state);
+        let should_pulse = session.attention.is_pulsating(&session.state);
         let is_editing = self.editing_session_id.as_deref() == Some(&session.session_id);
 
         // Update session's individual VU meter levels
@@ -116,13 +116,14 @@ impl AgentDeckApp {
 
         let stroke_color = if is_selected {
             Color32::from_rgb(0, 220, 140)
-        } else if should_blink {
-            let blink = (pulse_phase * 2.5).sin() > 0.0;
-            if blink {
-                Color32::from_rgb(255, 190, 20)
-            } else {
-                Color32::from_rgb(110, 80, 10)
-            }
+        } else if should_pulse {
+            // Gentle smooth breathing wave (stops automatically after 4s)
+            let breathe = (pulse_phase * 1.5).sin() * 0.5 + 0.5;
+            Color32::from_rgb(
+                lerp(140.0, 255.0, breathe) as u8,
+                lerp(100.0, 205.0, breathe) as u8,
+                lerp(15.0, 25.0, breathe) as u8,
+            )
         } else if is_waiting {
             Color32::from_rgb(180, 140, 20)
         } else if response.hovered() {
@@ -154,8 +155,9 @@ impl AgentDeckApp {
         };
 
         let led_center = row_rect.min + vec2(12.0, 14.0);
-        let pulse_intensity = if should_blink {
-            ((pulse_phase * 3.2).sin() * 0.4 + 0.6).clamp(0.1, 1.0)
+        let pulse_intensity = if should_pulse {
+            let breathe = (pulse_phase * 1.5).sin() * 0.35 + 0.65;
+            breathe.clamp(0.2, 1.0)
         } else if is_waiting {
             0.85
         } else if is_active {
@@ -302,11 +304,11 @@ impl AgentDeckApp {
                 let seg_rect = Rect::from_min_size(pos2(x, seg_y), vec2(bar_w, 2.5));
                 let seg_color = if seg < active_segments {
                     if seg >= 4 {
-                        Color32::from_rgb(255, 80, 80)
+                        Color32::from_rgb(255, 80, 80) // Red Peak
                     } else if seg >= 3 {
-                        Color32::from_rgb(255, 200, 30)
+                        Color32::from_rgb(255, 200, 30) // Amber Mid
                     } else {
-                        Color32::from_rgb(0, 255, 100)
+                        Color32::from_rgb(0, 255, 100) // Green
                     }
                 } else {
                     Color32::from_rgb(14, 24, 18)
@@ -366,10 +368,15 @@ impl eframe::App for AgentDeckApp {
         self.pulse_phase += dt * 4.0;
         let scale = self.font_scale;
 
+        // Clear all unacknowledged notification pulses whenever user clicks anywhere on the window
+        if ctx.input(|i| i.pointer.any_click() || i.pointer.any_pressed()) {
+            self.hub.acknowledge_all();
+        }
+
         // Ingest stream updates
         self.hub.poll_events();
 
-        // Dynamically compute active environment category tabs (Zero-session auto-filtering!)
+        // Dynamically compute active environment category tabs
         let active_categories = self.hub.active_categories();
         if self.hub.selected_tab_idx >= active_categories.len() {
             self.hub.selected_tab_idx = 0;
@@ -409,13 +416,17 @@ impl eframe::App for AgentDeckApp {
                 let active_bridges = self.hub.get_active_bridges();
                 if !active_bridges.is_empty() {
                     let bridge_name = active_bridges.join(", ");
-                    let is_recent_connect = self.hub.last_bridge_connected_at.map(|t| t.elapsed().as_secs_f32() < 4.0).unwrap_or(false);
-                    
+                    let is_recent_connect = self
+                        .hub
+                        .last_bridge_connected_at
+                        .map(|t| t.elapsed().as_secs_f32() < 4.0)
+                        .unwrap_or(false);
+
                     let link_col = if is_recent_connect {
-                        let glow = ((self.pulse_phase * 4.0).sin() * 0.4 + 0.6).clamp(0.2, 1.0);
-                        Color32::from_rgb((0.0 * glow) as u8, (255.0 * glow) as u8, (230.0 * glow) as u8)
+                        let breathe = (self.pulse_phase * 1.5).sin() * 0.35 + 0.65;
+                        Color32::from_rgb(0, (240.0 * breathe) as u8, (200.0 * breathe) as u8)
                     } else {
-                        Color32::from_rgb(0, 210, 160)
+                        Color32::from_rgb(0, 210, 160) // Calm steady solid cyan
                     };
 
                     ui.add_space(6.0);
@@ -461,8 +472,12 @@ impl eframe::App for AgentDeckApp {
                     };
 
                     let tab_border = if is_unacked {
-                        let blink = (self.pulse_phase * 2.5).sin() > 0.0;
-                        if blink { Color32::from_rgb(255, 205, 0) } else { Color32::from_rgb(120, 90, 0) }
+                        let breathe = (self.pulse_phase * 1.5).sin() * 0.5 + 0.5;
+                        Color32::from_rgb(
+                            lerp(140.0, 255.0, breathe) as u8,
+                            lerp(100.0, 205.0, breathe) as u8,
+                            0,
+                        )
                     } else if is_waiting {
                         Color32::from_rgb(180, 140, 20)
                     } else if is_active {
@@ -472,8 +487,7 @@ impl eframe::App for AgentDeckApp {
                     };
 
                     let dot = if is_unacked {
-                        let blink = (self.pulse_phase * 2.5).sin() > 0.0;
-                        if blink { "*" } else { "o" }
+                        "*"
                     } else if is_waiting {
                         "*"
                     } else {
@@ -581,7 +595,7 @@ impl eframe::App for AgentDeckApp {
 
                         ui.colored_label(
                             Color32::from_rgb(50, 75, 60),
-                            egui::RichText::new("[EDIT] Rename • Click to Ack • Drag corner to resize").monospace().size(9.0 * scale),
+                            egui::RichText::new("[EDIT] Rename • Click window to ack • Drag corner to resize").monospace().size(9.0 * scale),
                         );
                     });
                 });

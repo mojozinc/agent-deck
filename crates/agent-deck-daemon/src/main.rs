@@ -24,6 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, _rx) = broadcast::channel::<String>(100);
     let tx_broadcast = tx.clone();
     let watcher_mutex = Arc::new(Mutex::new(TranscriptWatcher::new()));
+
+    // Perform initial scan on startup so current state is immediately warm
+    {
+        let mut watcher = watcher_mutex.lock().await;
+        let initial_events = watcher.scan_and_collect_events();
+        println!("🔍 Initial scan found {} active sessions in [{}]", initial_events.len(), distro);
+    }
+
     let watcher_bg = watcher_mutex.clone();
     let distro_bg = distro.clone();
 
@@ -42,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Periodic Bridge Heartbeat (every ~3 seconds) to keep UI connection status fresh
+            // Periodic Bridge Heartbeat (every ~3 seconds)
             if heartbeat_tick % 8 == 0 {
                 let hb_event = SessionEvent::new(
                     format!("wsl-bridge-{}", distro_bg),
@@ -100,15 +108,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = writer.write_all(payload.as_bytes()).await;
             }
 
-            // Immediately scan and send active events on connect
-            {
-                let mut watcher = watcher_conn.lock().await;
-                let events = watcher.scan_and_collect_events();
-                for event in events {
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        let payload = format!("{}\n", json);
-                        let _ = writer.write_all(payload.as_bytes()).await;
-                    }
+            // Immediately send ALL currently known active sessions to the newly connected UI!
+            let current_sessions = {
+                let watcher = watcher_conn.lock().await;
+                watcher.get_latest_sessions()
+            };
+
+            for event in current_sessions {
+                if let Ok(json) = serde_json::to_string(&event) {
+                    let payload = format!("{}\n", json);
+                    let _ = writer.write_all(payload.as_bytes()).await;
                 }
             }
 
