@@ -1,34 +1,19 @@
-use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
+﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-#[derive(Clone, Copy, Debug)]
-pub struct TabConfig {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub icon: &'static str,
-    pub filter: fn(&ActiveSession) -> bool,
-}
-
-pub const DEFAULT_TABS: &[TabConfig] = &[
-    TabConfig {
-        id: "windows",
-        label: "Windows",
-        icon: "🪟",
-        filter: |s| s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-"),
-    },
-    TabConfig {
-        id: "wsl2",
-        label: "WSL2",
-        icon: "🐧",
-        filter: |s| !s.metadata.host.eq_ignore_ascii_case("windows") && !s.session_id.starts_with("win-"),
-    },
-];
-
 pub const ENABLE_BLINKING_ALERTS: bool = false; // Feature flag for blinking alerts (turned off)
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynamicCategory {
+    pub id: String,
+    pub label: String,
+    pub is_permanent: bool, // true for Windows
+    pub session_count: usize,
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttentionState {
@@ -226,26 +211,107 @@ impl SessionHub {
         }
     }
 
-    /// Returns sessions matching a configured tab filter
-    pub fn sessions_matching(&self, filter: fn(&ActiveSession) -> bool) -> Vec<&ActiveSession> {
-        self.sessions.iter().filter(|s| filter(s)).collect()
+    /// Dynamically computes active category tabs.
+    /// - "Windows" is always permanent.
+    /// - WSL and remote host categories are discovered from active sessions.
+    /// - Any non-permanent category with 0 sessions is automatically filtered out!
+    pub fn active_categories(&self) -> Vec<DynamicCategory> {
+        let mut categories = Vec::new();
+
+        // 1. Permanent Windows Anchor Tab
+        let win_sessions: Vec<&ActiveSession> = self
+            .sessions
+            .iter()
+            .filter(|s| s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-"))
+            .collect();
+
+        categories.push(DynamicCategory {
+            id: "windows".to_string(),
+            label: "Windows".to_string(),
+            is_permanent: true,
+            session_count: win_sessions.len(),
+        });
+
+        // 2. Discover all non-Windows environment hosts from active sessions
+        let mut discovered_hosts: HashMap<String, usize> = HashMap::new();
+        for s in &self.sessions {
+            let host_raw = &s.metadata.host;
+            let is_win = host_raw.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-");
+            if !is_win {
+                let clean_label = if let Some(stripped) = host_raw.strip_prefix("wsl:") {
+                    stripped.to_string()
+                } else if host_raw.is_empty() {
+                    "WSL2".to_string()
+                } else {
+                    host_raw.clone()
+                };
+
+                *discovered_hosts.entry(clean_label).or_insert(0) += 1;
+            }
+        }
+
+        let mut sorted_hosts: Vec<(String, usize)> = discovered_hosts.into_iter().collect();
+        sorted_hosts.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (host_label, count) in sorted_hosts {
+            if count > 0 {
+                // Zero-session auto-filtering!
+                categories.push(DynamicCategory {
+                    id: format!("host:{}", host_label),
+                    label: host_label,
+                    is_permanent: false,
+                    session_count: count,
+                });
+            }
+        }
+
+        categories
     }
 
-    /// Checks if any session in the given list requires user input (either blinking or acknowledged)
+    /// Returns sessions belonging to a specific category
+    pub fn sessions_for_category<'a>(&'a self, cat: &DynamicCategory) -> Vec<&'a ActiveSession> {
+        if cat.id == "windows" {
+            self.sessions
+                .iter()
+                .filter(|s| s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-"))
+                .collect()
+        } else if let Some(target_host) = cat.id.strip_prefix("host:") {
+            self.sessions
+                .iter()
+                .filter(|s| {
+                    let host_clean = s.metadata.host.strip_prefix("wsl:").unwrap_or(&s.metadata.host);
+                    host_clean.eq_ignore_ascii_case(target_host)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Checks if any session in the given list requires user input
     pub fn has_waiting_input(sessions: &[&ActiveSession]) -> bool {
         sessions.iter().any(|s| matches!(s.state, AgentState::WaitingForInput { .. }))
     }
 
-    /// Checks if any session in the given list has an unacknowledged active blinking alert
+    /// Checks if any session in the given list has an unacknowledged active alert
     pub fn has_unacknowledged_input(sessions: &[&ActiveSession]) -> bool {
         sessions.iter().any(|s| s.attention.should_blink(&s.state))
     }
 
-    /// Acknowledges all sessions matching a given filter
-    pub fn acknowledge_matching(&mut self, filter: fn(&ActiveSession) -> bool) {
-        for s in self.sessions.iter_mut() {
-            if filter(s) {
-                s.attention.acknowledge();
+    /// Acknowledges all sessions in a given category
+    pub fn acknowledge_category(&mut self, cat: &DynamicCategory) {
+        if cat.id == "windows" {
+            for s in self.sessions.iter_mut() {
+                if s.metadata.host.eq_ignore_ascii_case("windows") || s.session_id.starts_with("win-") {
+                    s.attention.acknowledge();
+                }
+            }
+        } else if let Some(target_host) = cat.id.strip_prefix("host:") {
+            for s in self.sessions.iter_mut() {
+                let host_clean = s.metadata.host.strip_prefix("wsl:").unwrap_or(&s.metadata.host);
+                if host_clean.eq_ignore_ascii_case(target_host) {
+                    s.attention.acknowledge();
+                }
             }
         }
     }

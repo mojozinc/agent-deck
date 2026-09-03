@@ -9,7 +9,7 @@ use adapter::StreamAdapter;
 use agent_deck_core::AgentState;
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, Rounding, Stroke};
-use hub::{ActiveSession, CustomTitlesStorage, SessionHub, DEFAULT_TABS};
+use hub::{ActiveSession, CustomTitlesStorage, DynamicCategory, SessionHub};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,7 @@ pub struct AgentDeckApp {
     last_frame_time: Instant,
     pulse_phase: f32,
     is_compact_mode: bool,
-    font_scale: f32, // Configurable font scale (default 1.15)
+    font_scale: f32,
 }
 
 impl AgentDeckApp {
@@ -54,7 +54,7 @@ impl AgentDeckApp {
             last_frame_time: Instant::now(),
             pulse_phase: 0.0,
             is_compact_mode: false,
-            font_scale: 1.15, // Crisp, easily readable default size
+            font_scale: 1.15,
         }
     }
 
@@ -173,20 +173,26 @@ impl AgentDeckApp {
         painter.circle_filled(led_center, 4.5, glow_rgba);
         painter.circle_filled(led_center, 2.0, Color32::WHITE);
 
-        // 2. Line 1: Clean Metadata & Badges
+        // 2. Line 1: Clean Metadata & Badges (with optional WSL distro tag)
         let header_y = row_rect.min.y + 6.0;
+
+        let host_tag = if let Some(distro) = session.metadata.host.strip_prefix("wsl:") {
+            format!("{} • ", distro)
+        } else {
+            String::new()
+        };
 
         let badge_text = if let Some(ref tmux_s) = session.metadata.tmux_session {
             if let Some(ref tmux_w) = session.metadata.tmux_window {
-                format!("{} • tmux:{}:{}", session.agent_type, tmux_s, tmux_w)
+                format!("{} • {}tmux:{}:{}", session.agent_type, host_tag, tmux_s, tmux_w)
             } else {
-                format!("{} • tmux:{}", session.agent_type, tmux_s)
+                format!("{} • {}tmux:{}", session.agent_type, host_tag, tmux_s)
             }
         } else {
             if session.display_name.starts_with(&session.agent_type) {
                 session.display_name.clone()
             } else {
-                format!("{} • {}", session.agent_type, session.display_name)
+                format!("{} • {}{}", session.agent_type, host_tag, session.display_name)
             }
         };
 
@@ -203,7 +209,7 @@ impl AgentDeckApp {
             Color32::from_rgb(0, 220, 200),
         );
 
-        // Edit button [EDIT] (Universal text badge, zero missing glyph boxes)
+        // Edit button [EDIT]
         let edit_btn_x = badge_x + badge_len_approx + 6.0;
         let edit_btn_rect = Rect::from_min_size(pos2(edit_btn_x, header_y), vec2(36.0 * scale, 13.0 * scale));
         let edit_btn_resp = ui.interact(edit_btn_rect, ui.id().with(&session.session_id).with("edit_btn"), egui::Sense::click());
@@ -239,7 +245,7 @@ impl AgentDeckApp {
             Color32::from_rgb(60, 160, 90),
         );
 
-        // 3. Line 2: Status Text Display (Static when waiting for input, scrolling when active)
+        // 3. Line 2: Status Text Display
         let marquee_y = row_rect.min.y + 25.0 * scale.min(1.2);
         let marquee_area = Rect::from_min_max(
             pos2(row_rect.min.x + 8.0, marquee_y),
@@ -260,7 +266,6 @@ impl AgentDeckApp {
         row_painter.set_clip_rect(marquee_area);
 
         if is_waiting {
-            // Stop scrolling text completely - no movement, clean static text!
             row_painter.text(
                 pos2(marquee_area.min.x + 2.0, marquee_y),
                 egui::Align2::LEFT_TOP,
@@ -269,7 +274,6 @@ impl AgentDeckApp {
                 text_color,
             );
         } else {
-            // Smooth scrolling marquee for long active logs
             let display_text = format!("   {}   ", session.status_text);
             let char_w = 7.0 * scale;
             let total_text_width = display_text.len() as f32 * char_w;
@@ -298,11 +302,11 @@ impl AgentDeckApp {
                 let seg_rect = Rect::from_min_size(pos2(x, seg_y), vec2(bar_w, 2.5));
                 let seg_color = if seg < active_segments {
                     if seg >= 4 {
-                        Color32::from_rgb(255, 80, 80) // Red Peak
+                        Color32::from_rgb(255, 80, 80)
                     } else if seg >= 3 {
-                        Color32::from_rgb(255, 200, 30) // Amber Mid
+                        Color32::from_rgb(255, 200, 30)
                     } else {
-                        Color32::from_rgb(0, 255, 100) // Green
+                        Color32::from_rgb(0, 255, 100)
                     }
                 } else {
                     Color32::from_rgb(14, 24, 18)
@@ -311,7 +315,7 @@ impl AgentDeckApp {
             }
         }
 
-        // 5. Inline Rename Overlay (Reliable Enter-key save & immediate UI update)
+        // 5. Inline Rename Overlay
         if is_editing {
             let edit_y = row_rect.min.y + 46.0 * scale.min(1.2);
             let edit_ui_rect = Rect::from_min_size(pos2(row_rect.min.x + 8.0, edit_y), vec2(row_rect.width() - 16.0, 22.0));
@@ -326,7 +330,6 @@ impl AgentDeckApp {
                             .font(FontId::monospace(10.5 * scale))
                     );
 
-                    // Reliable Enter-to-save check
                     let enter_pressed = text_input.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let save_clicked = ui.button(egui::RichText::new("Save").size(9.5 * scale)).clicked();
                     
@@ -365,6 +368,12 @@ impl eframe::App for AgentDeckApp {
 
         // Ingest stream updates
         self.hub.poll_events();
+
+        // Dynamically compute active environment category tabs (Zero-session auto-filtering!)
+        let active_categories = self.hub.active_categories();
+        if self.hub.selected_tab_idx >= active_categories.len() {
+            self.hub.selected_tab_idx = 0;
+        }
 
         // Draw Retro Winamp Main Frame
         let panel_frame = egui::Frame::none()
@@ -417,10 +426,10 @@ impl eframe::App for AgentDeckApp {
 
             ui.add_space(3.0);
 
-            // Config-Driven Environment Tabs Rendering (Universal bullet symbols)
+            // Dynamic Category Tabs Rendering
             ui.horizontal(|ui| {
-                for (tab_idx, tab_cfg) in DEFAULT_TABS.iter().enumerate() {
-                    let matching_sessions = self.hub.sessions_matching(tab_cfg.filter);
+                for (tab_idx, cat) in active_categories.iter().enumerate() {
+                    let matching_sessions = self.hub.sessions_for_category(cat);
                     let count = matching_sessions.len();
                     let is_unacked = SessionHub::has_unacknowledged_input(&matching_sessions);
                     let is_waiting = SessionHub::has_waiting_input(&matching_sessions);
@@ -452,7 +461,7 @@ impl eframe::App for AgentDeckApp {
                         "o"
                     };
 
-                    let tab_label = format!("{} {} • {}", dot, tab_cfg.label, count);
+                    let tab_label = format!("{} {} • {}", dot, cat.label, count);
 
                     let btn = egui::Button::new(
                         egui::RichText::new(tab_label)
@@ -465,7 +474,7 @@ impl eframe::App for AgentDeckApp {
 
                     if ui.add(btn).clicked() {
                         self.hub.selected_tab_idx = tab_idx;
-                        self.hub.acknowledge_matching(tab_cfg.filter);
+                        self.hub.acknowledge_category(cat);
                     }
                 }
             });
@@ -473,11 +482,8 @@ impl eframe::App for AgentDeckApp {
             ui.add_space(4.0);
 
             if !self.is_compact_mode {
-                // Reactive ScrollArea driven dynamically by selected TabConfig
-                let current_tab_filter = DEFAULT_TABS
-                    .get(self.hub.selected_tab_idx)
-                    .map(|t| t.filter)
-                    .unwrap_or(DEFAULT_TABS[0].filter);
+                let current_cat = active_categories.get(self.hub.selected_tab_idx).cloned().unwrap_or(active_categories[0].clone());
+                let matching_sessions = self.hub.sessions_for_category(&current_cat);
 
                 let dt = dt;
                 let pulse_phase = self.pulse_phase;
@@ -487,14 +493,7 @@ impl eframe::App for AgentDeckApp {
                     .max_height(available_h)
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        let mut matching_indices: Vec<usize> = Vec::new();
-                        for (idx, s) in self.hub.sessions.iter().enumerate() {
-                            if current_tab_filter(s) {
-                                matching_indices.push(idx);
-                            }
-                        }
-
-                        if matching_indices.is_empty() {
+                        if matching_sessions.is_empty() {
                             ui.add_space(15.0);
                             ui.vertical_centered(|ui| {
                                 ui.colored_label(
@@ -503,19 +502,21 @@ impl eframe::App for AgentDeckApp {
                                 );
                             });
                         } else {
-                            for idx in matching_indices {
-                                let mut session = self.hub.sessions[idx].clone();
-                                
-                                // Ensure persistent custom titles always apply immediately
-                                if let Ok(storage) = self.hub.custom_titles.read() {
-                                    if let Some(custom) = storage.get_title(&session.session_id) {
-                                        session.display_name = custom;
-                                    }
-                                }
+                            let mut matching_ids: Vec<String> = matching_sessions.iter().map(|s| s.session_id.clone()).collect();
+                            for session_id in matching_ids {
+                                if let Some(idx) = self.hub.sessions.iter().position(|s| s.session_id == session_id) {
+                                    let mut session = self.hub.sessions[idx].clone();
 
-                                self.render_session_row(ui, &mut session, dt, pulse_phase);
-                                self.hub.sessions[idx] = session;
-                                ui.add_space(3.0);
+                                    if let Ok(storage) = self.hub.custom_titles.read() {
+                                        if let Some(custom) = storage.get_title(&session.session_id) {
+                                            session.display_name = custom;
+                                        }
+                                    }
+
+                                    self.render_session_row(ui, &mut session, dt, pulse_phase);
+                                    self.hub.sessions[idx] = session;
+                                    ui.add_space(3.0);
+                                }
                             }
                         }
                     });
