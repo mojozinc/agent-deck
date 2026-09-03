@@ -68,24 +68,27 @@ impl AgentDeckApp {
         let scale = self.font_scale;
         let is_active = matches!(session.state, AgentState::Thinking | AgentState::RunningTool { .. });
         let is_waiting = matches!(session.state, AgentState::WaitingForInput { .. });
+        let is_stale = session.is_stale();
         let should_pulse = session.attention.is_pulsating(&session.state);
         let is_editing = self.editing_session_id.as_deref() == Some(&session.session_id);
 
         // Update session's individual VU meter levels
         for (i, bar) in session.vu_levels.iter_mut().enumerate() {
-            if is_active {
+            if is_stale {
+                *bar = lerp(*bar, 0.0, dt * 6.0);
+            } else if is_active {
                 let wave = ((pulse_phase * 2.8 + i as f32 * 0.6).sin() * 0.5 + 0.5)
                     * ((pulse_phase * 1.1 + (8 - i) as f32 * 0.4).cos() * 0.4 + 0.6);
                 *bar = lerp(*bar, wave, dt * 12.0);
             } else if is_waiting {
-                *bar = lerp(*bar, 0.0, dt * 6.0); // Calm resting state when waiting for input
+                *bar = lerp(*bar, 0.0, dt * 6.0);
             } else {
                 *bar = lerp(*bar, 0.05, dt * 4.0);
             }
         }
 
         // Marquee scroll only when actively running/thinking
-        if !is_waiting {
+        if !is_waiting && !is_stale {
             session.marquee_offset += dt * 38.0;
         } else {
             session.marquee_offset = 0.0;
@@ -110,6 +113,8 @@ impl AgentDeckApp {
             Color32::from_rgb(10, 22, 16)
         } else if response.hovered() {
             Color32::from_rgb(12, 18, 14)
+        } else if is_stale {
+            Color32::from_rgb(6, 9, 8)
         } else {
             Color32::from_rgb(7, 12, 9)
         };
@@ -117,13 +122,14 @@ impl AgentDeckApp {
         let stroke_color = if is_selected {
             Color32::from_rgb(0, 220, 140)
         } else if should_pulse {
-            // Gentle smooth breathing wave (stops automatically after 4s)
             let breathe = (pulse_phase * 1.5).sin() * 0.5 + 0.5;
             Color32::from_rgb(
                 lerp(140.0, 255.0, breathe) as u8,
                 lerp(100.0, 205.0, breathe) as u8,
                 lerp(15.0, 25.0, breathe) as u8,
             )
+        } else if is_stale {
+            Color32::from_rgb(45, 40, 35)
         } else if is_waiting {
             Color32::from_rgb(180, 140, 20)
         } else if response.hovered() {
@@ -145,19 +151,25 @@ impl AgentDeckApp {
         }
 
         // 1. Status LED Indicator on Left
-        let (state_label, main_glow_color) = match &session.state {
-            AgentState::Thinking => ("THINKING", Color32::from_rgb(0, 255, 128)),
-            AgentState::RunningTool { name, .. } => (name.as_str(), Color32::from_rgb(50, 255, 100)),
-            AgentState::WaitingForInput { .. } => ("INPUT REQUIRED", Color32::from_rgb(255, 205, 20)),
-            AgentState::Error { .. } => ("ERROR", Color32::from_rgb(255, 70, 70)),
-            AgentState::Finished => ("FINISHED", Color32::from_rgb(0, 220, 255)),
-            AgentState::Idle => ("IDLE", Color32::from_rgb(90, 130, 110)),
+        let (state_label, main_glow_color) = if is_stale {
+            ("STALE", Color32::from_rgb(160, 135, 100))
+        } else {
+            match &session.state {
+                AgentState::Thinking => ("THINKING", Color32::from_rgb(0, 255, 128)),
+                AgentState::RunningTool { name, .. } => (name.as_str(), Color32::from_rgb(50, 255, 100)),
+                AgentState::WaitingForInput { .. } => ("INPUT REQUIRED", Color32::from_rgb(255, 205, 20)),
+                AgentState::Error { .. } => ("ERROR", Color32::from_rgb(255, 70, 70)),
+                AgentState::Finished => ("FINISHED", Color32::from_rgb(0, 220, 255)),
+                AgentState::Idle => ("IDLE", Color32::from_rgb(90, 130, 110)),
+            }
         };
 
         let led_center = row_rect.min + vec2(12.0, 14.0);
         let pulse_intensity = if should_pulse {
             let breathe = (pulse_phase * 1.5).sin() * 0.35 + 0.65;
             breathe.clamp(0.2, 1.0)
+        } else if is_stale {
+            0.4
         } else if is_waiting {
             0.85
         } else if is_active {
@@ -228,8 +240,26 @@ impl AgentDeckApp {
             self.edit_text_buffer = session.display_name.clone();
         }
 
-        let state_x = (edit_btn_x + 42.0 * scale + 10.0).min(row_rect.max.x - 170.0);
-        if state_x > edit_btn_x + 40.0 {
+        let mut next_x = edit_btn_x + 42.0 * scale;
+
+        // If stale, render prominent [DISMISS] button
+        if is_stale {
+            let dismiss_pill_rect = Rect::from_min_size(pos2(next_x, header_y), vec2(56.0 * scale, 13.0 * scale));
+            let dismiss_pill_resp = ui.interact(dismiss_pill_rect, ui.id().with(&session.session_id).with("dismiss_pill"), egui::Sense::click());
+            let pill_col = if dismiss_pill_resp.hovered() {
+                Color32::from_rgb(255, 120, 120)
+            } else {
+                Color32::from_rgb(210, 140, 90)
+            };
+            painter.text(dismiss_pill_rect.min, egui::Align2::LEFT_TOP, "[DISMISS]", FontId::monospace(9.0 * scale), pill_col);
+            if dismiss_pill_resp.clicked() {
+                self.hub.dismiss_session(&session.session_id);
+            }
+            next_x += 60.0 * scale;
+        }
+
+        let state_x = (next_x + 6.0).min(row_rect.max.x - 180.0);
+        if state_x > next_x + 4.0 {
             painter.text(
                 pos2(state_x, header_y),
                 egui::Align2::LEFT_TOP,
@@ -240,12 +270,25 @@ impl AgentDeckApp {
         }
 
         painter.text(
-            pos2(row_rect.max.x - 68.0, header_y),
+            pos2(row_rect.max.x - 84.0, header_y),
             egui::Align2::RIGHT_TOP,
             format!("STEP {:03}", session.step_count),
             FontId::monospace(9.0 * scale),
             Color32::from_rgb(60, 160, 90),
         );
+
+        // Quick Close 'x' button on far right of row
+        let close_btn_rect = Rect::from_min_size(pos2(row_rect.max.x - 76.0, header_y - 1.0), vec2(14.0 * scale, 13.0 * scale));
+        let close_btn_resp = ui.interact(close_btn_rect, ui.id().with(&session.session_id).with("close_btn"), egui::Sense::click());
+        let close_col = if close_btn_resp.hovered() {
+            Color32::from_rgb(255, 100, 100)
+        } else {
+            Color32::from_rgb(65, 80, 75)
+        };
+        painter.text(close_btn_rect.min, egui::Align2::LEFT_TOP, "✕", FontId::monospace(9.0 * scale), close_col);
+        if close_btn_resp.clicked() {
+            self.hub.dismiss_session(&session.session_id);
+        }
 
         // 3. Line 2: Status Text Display
         let marquee_y = row_rect.min.y + 25.0 * scale.min(1.2);
@@ -254,11 +297,15 @@ impl AgentDeckApp {
             pos2(row_rect.max.x - 68.0, marquee_y + 18.0 * scale),
         );
 
-        let text_color = match &session.state {
-            AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 215, 60),
-            AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
-            AgentState::Finished => Color32::from_rgb(100, 220, 255),
-            _ => Color32::from_rgb(40, 255, 120),
+        let text_color = if is_stale {
+            Color32::from_rgb(160, 150, 130)
+        } else {
+            match &session.state {
+                AgentState::WaitingForInput { .. } => Color32::from_rgb(255, 215, 60),
+                AgentState::Error { .. } => Color32::from_rgb(255, 120, 120),
+                AgentState::Finished => Color32::from_rgb(100, 220, 255),
+                _ => Color32::from_rgb(40, 255, 120),
+            }
         };
 
         let font_status = FontId::monospace(11.5 * scale);
@@ -267,11 +314,17 @@ impl AgentDeckApp {
         let prev_clip = row_painter.clip_rect();
         row_painter.set_clip_rect(marquee_area);
 
-        if is_waiting {
+        if is_waiting || is_stale {
+            let status_line = if is_stale {
+                format!("(Inactive > 15m) {}", session.status_text)
+            } else {
+                session.status_text.clone()
+            };
+
             row_painter.text(
                 pos2(marquee_area.min.x + 2.0, marquee_y),
                 egui::Align2::LEFT_TOP,
-                &session.status_text,
+                &status_line,
                 font_status,
                 text_color,
             );
@@ -426,7 +479,7 @@ impl eframe::App for AgentDeckApp {
                         let breathe = (self.pulse_phase * 1.5).sin() * 0.35 + 0.65;
                         Color32::from_rgb(0, (240.0 * breathe) as u8, (200.0 * breathe) as u8)
                     } else {
-                        Color32::from_rgb(0, 210, 160) // Calm steady solid cyan
+                        Color32::from_rgb(0, 210, 160)
                     };
 
                     ui.add_space(6.0);
@@ -595,7 +648,7 @@ impl eframe::App for AgentDeckApp {
 
                         ui.colored_label(
                             Color32::from_rgb(50, 75, 60),
-                            egui::RichText::new("[EDIT] Rename • Click window to ack • Drag corner to resize").monospace().size(9.0 * scale),
+                            egui::RichText::new("[EDIT] Rename • [DISMISS] Dismiss • Drag corner to resize").monospace().size(9.0 * scale),
                         );
                     });
                 });

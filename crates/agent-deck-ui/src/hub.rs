@@ -1,5 +1,5 @@
 ﻿use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
@@ -143,6 +143,13 @@ pub struct ActiveSession {
     pub attention: AttentionState,
 }
 
+impl ActiveSession {
+    /// Returns true if this session has seen no updates for > 15 minutes
+    pub fn is_stale(&self) -> bool {
+        self.last_updated.elapsed().as_secs() > 15 * 60
+    }
+}
+
 pub struct SessionHub {
     pub sessions: Vec<ActiveSession>,
     pub rx: Receiver<SessionEvent>,
@@ -151,6 +158,7 @@ pub struct SessionHub {
     pub custom_titles: Arc<RwLock<CustomTitlesStorage>>,
     pub connected_bridges: HashMap<String, Instant>, // Distro -> Last Heartbeat
     pub last_bridge_connected_at: Option<Instant>,
+    pub dismissed_sessions: HashSet<String>,
 }
 
 impl SessionHub {
@@ -165,6 +173,7 @@ impl SessionHub {
             custom_titles,
             connected_bridges: HashMap::new(),
             last_bridge_connected_at: None,
+            dismissed_sessions: HashSet::new(),
         }
     }
 
@@ -198,6 +207,16 @@ impl SessionHub {
 
                 self.connected_bridges.insert(distro, Instant::now());
                 continue;
+            }
+
+            // Ignore dismissed sessions unless brand new active steps occur
+            if self.dismissed_sessions.contains(&event.session_id) {
+                if let Some(existing) = self.sessions.iter().find(|s| s.session_id == event.session_id) {
+                    if event.step_count <= existing.step_count {
+                        continue;
+                    }
+                }
+                self.dismissed_sessions.remove(&event.session_id);
             }
 
             let display_name = if let Some(ref storage) = titles_guard {
@@ -234,6 +253,12 @@ impl SessionHub {
                 });
             }
         }
+    }
+
+    /// Manually dismisses a session from the deck view
+    pub fn dismiss_session(&mut self, session_id: &str) {
+        self.dismissed_sessions.insert(session_id.to_string());
+        self.sessions.retain(|s| s.session_id != session_id);
     }
 
     /// Acknowledges all active notifications across all sessions and bridges
