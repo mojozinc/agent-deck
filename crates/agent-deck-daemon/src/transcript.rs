@@ -218,23 +218,18 @@ impl TranscriptWatcher {
                     .and_then(|s| s.as_str())
                     .unwrap_or("");
 
-                if tool_name == "ask_question" {
-                    (
-                        AgentState::WaitingForApproval {
-                            name: tool_name.to_string(),
-                            summary: tool_summary.to_string(),
-                        },
-                        format!("APPROVAL REQUIRED: {}", tool_summary),
-                    )
-                } else {
-                    (
-                        AgentState::RunningTool {
-                            name: tool_name.to_string(),
-                            summary: tool_summary.to_string(),
-                        },
-                        format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
-                    )
-                }
+                // In CLI mode, any proposed tool step awaiting output requires user permission/confirmation
+                (
+                    AgentState::WaitingForApproval {
+                        name: tool_name.to_string(),
+                        summary: tool_summary.to_string(),
+                    },
+                    if tool_action.is_empty() {
+                        format!("PERMISSION REQUIRED: {} - {}", tool_name, tool_summary)
+                    } else {
+                        format!("PERMISSION REQUIRED: {} ({})", tool_summary, tool_action)
+                    },
+                )
             } else {
                 (AgentState::Thinking, "THINKING • REASONING...".to_string())
             }

@@ -2,18 +2,45 @@
 use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::OpenOptionsExt;
+
 pub struct NativeWindowsAdapter;
 
 impl NativeWindowsAdapter {
     pub fn new() -> Self {
         Self
+    }
+}
+
+/// Checks if an OS file lock is actively held by the CLI process
+fn is_session_process_active(presence_dir: &Path, session_id: &str) -> bool {
+    let lock_file = presence_dir.join(format!("{}.lock", session_id));
+    if !lock_file.exists() {
+        return false;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Attempt to open exclusively with share_mode(0) (zero sharing allowed).
+        // If agy.exe holds the file open, Windows kernel returns a Sharing Violation (Err) -> ACTIVELY RUNNING.
+        // If agy.exe has exited, OpenOptions succeeds (Ok) -> DEAD / TERMINATED.
+        match OpenOptions::new().read(true).write(true).share_mode(0).open(&lock_file) {
+            Ok(_) => false, // Successfully opened exclusively -> No process holds it -> Dead
+            Err(_) => true, // Sharing violation -> ACTIVELY LOCKED by agy.exe -> Alive
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
     }
 }
 
@@ -167,7 +194,8 @@ impl StreamAdapter for NativeWindowsAdapter {
     fn start(&mut self, tx: Sender<SessionEvent>) {
         thread::spawn(move || {
             let home_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\schordinger".to_string());
-            let brain_dir = PathBuf::from(home_dir).join(".gemini\\antigravity-cli\\brain");
+            let brain_dir = PathBuf::from(&home_dir).join(".gemini\\antigravity-cli\\brain");
+            let presence_dir = PathBuf::from(&home_dir).join(".gemini\\antigravity-cli\\presence");
 
             let mut watched_files: HashMap<PathBuf, u64> = HashMap::new();
             let mut session_titles: HashMap<PathBuf, String> = HashMap::new();
@@ -187,6 +215,12 @@ impl StreamAdapter for NativeWindowsAdapter {
                             if file_type.is_dir() {
                                 let session_dir = entry.path();
                                 let session_id = entry.file_name().to_string_lossy().to_string();
+
+                                // Liveness verification: Only process sessions whose OS presence lock is actively held!
+                                if !is_session_process_active(&presence_dir, &session_id) {
+                                    continue;
+                                }
+
                                 let transcript_path = session_dir.join(".system_generated\\logs\\transcript.jsonl");
                                 if transcript_path.exists() {
                                     if let Ok(meta) = std::fs::metadata(&transcript_path) {
@@ -269,23 +303,17 @@ impl StreamAdapter for NativeWindowsAdapter {
                                                     .and_then(|s| s.as_str())
                                                     .unwrap_or("");
 
-                                                if tool_name == "ask_question" {
-                                                    (
-                                                        AgentState::WaitingForApproval {
-                                                            name: tool_name.to_string(),
-                                                            summary: tool_summary.to_string(),
-                                                        },
-                                                        format!("APPROVAL REQUIRED: {}", tool_summary),
-                                                    )
-                                                } else {
-                                                    (
-                                                        AgentState::RunningTool {
-                                                            name: tool_name.to_string(),
-                                                            summary: tool_summary.to_string(),
-                                                        },
-                                                        format!("TOOL {}: {} {}", tool_name, tool_summary, tool_action),
-                                                    )
-                                                }
+                                                (
+                                                    AgentState::WaitingForApproval {
+                                                        name: tool_name.to_string(),
+                                                        summary: tool_summary.to_string(),
+                                                    },
+                                                    if tool_action.is_empty() {
+                                                        format!("PERMISSION REQUIRED: {} - {}", tool_name, tool_summary)
+                                                    } else {
+                                                        format!("PERMISSION REQUIRED: {} ({})", tool_summary, tool_action)
+                                                    },
+                                                )
                                             } else {
                                                 (AgentState::Thinking, "THINKING • REASONING...".to_string())
                                             }
