@@ -131,6 +131,95 @@ pub struct ParsedTranscriptStep {
     pub status_text: String,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TurnTermination {
+    Aborted,
+    PermissionDenied,
+    Normal,
+}
+
+impl TurnTermination {
+    fn classify(status_upper: &str, step_type: &str, content: &str) -> Self {
+        if matches!(status_upper, "ABORTED" | "CANCELLED" | "CANCELED" | "INTERRUPTED")
+            || step_type.eq_ignore_ascii_case("ABORTED")
+        {
+            return Self::Aborted;
+        }
+
+        if matches!(status_upper, "DENIED" | "PERMISSION_DENIED" | "REJECTED" | "DECLINED") {
+            return Self::PermissionDenied;
+        }
+
+        let content_lower = content.to_ascii_lowercase();
+        const DENIAL_PATTERNS: &[&str] = &[
+            "permission denied",
+            "tool call rejected by user",
+            "declined by user",
+            "user denied permission",
+            "permission rejected",
+        ];
+
+        if DENIAL_PATTERNS.iter().any(|&pat| content_lower.contains(pat)) {
+            return Self::PermissionDenied;
+        }
+
+        Self::Normal
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ToolMode {
+    RequiresApproval,
+    Autonomous,
+}
+
+impl ToolMode {
+    fn from_tool_metadata(
+        tool_status_upper: &str,
+        tool_name: &str,
+        tool_action: &str,
+        active_tool: &Value,
+    ) -> Self {
+        let explicit_approval = active_tool
+            .get("requires_approval")
+            .or_else(|| active_tool.get("approval_required"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if explicit_approval {
+            return Self::RequiresApproval;
+        }
+
+        if matches!(
+            tool_status_upper,
+            "WAITING_FOR_APPROVAL"
+                | "APPROVAL_REQUIRED"
+                | "WAITING_APPROVAL"
+                | "PENDING_APPROVAL"
+                | "CONFIRMATION_REQUIRED"
+        ) {
+            return Self::RequiresApproval;
+        }
+
+        if matches!(
+            tool_name,
+            "ask_question" | "ask_user" | "confirm" | "request_permission" | "confirmation"
+        ) {
+            return Self::RequiresApproval;
+        }
+
+        let action_lower = tool_action.to_ascii_lowercase();
+        if action_lower.contains("permission")
+            || action_lower.contains("approval")
+            || action_lower.contains("confirmation")
+        {
+            return Self::RequiresApproval;
+        }
+
+        Self::Autonomous
+    }
+}
+
 /// Deterministic parser and state machine for Antigravity CLI transcripts.
 pub struct AntigravityParser;
 
@@ -144,41 +233,27 @@ impl AntigravityParser {
 
         let status_upper = status.to_ascii_uppercase();
 
-        // 1. Aborted / Cancelled / Interrupted turns -> Transition cleanly to WaitingForInput
-        if status_upper == "ABORTED"
-            || status_upper == "CANCELLED"
-            || status_upper == "CANCELED"
-            || status_upper == "INTERRUPTED"
-            || step_type.to_ascii_uppercase() == "ABORTED"
-        {
-            return Some(ParsedTranscriptStep {
-                step_index,
-                state: AgentState::WaitingForInput {
-                    prompt_preview: "Query aborted by user".to_string(),
-                },
-                status_text: "ABORTED • WAITING FOR PROMPT".to_string(),
-            });
-        }
-
-        // 2. Permission denials -> Transition cleanly to WaitingForInput (never stuck in Thinking)
-        if status_upper == "DENIED"
-            || status_upper == "PERMISSION_DENIED"
-            || status_upper == "REJECTED"
-            || status_upper == "DECLINED"
-            || content.contains("Permission denied")
-            || content.contains("permission denied")
-            || content.contains("Tool call rejected by user")
-            || content.contains("declined by user")
-            || content.contains("User denied permission")
-            || content.contains("Permission rejected")
-        {
-            return Some(ParsedTranscriptStep {
-                step_index,
-                state: AgentState::WaitingForInput {
-                    prompt_preview: "Permission denied - ready for next instruction".to_string(),
-                },
-                status_text: "PERMISSION DENIED • WAITING FOR PROMPT".to_string(),
-            });
+        // 1 & 2. Turn termination (aborted query or permission denial)
+        match TurnTermination::classify(&status_upper, step_type, content) {
+            TurnTermination::Aborted => {
+                return Some(ParsedTranscriptStep {
+                    step_index,
+                    state: AgentState::WaitingForInput {
+                        prompt_preview: "Query aborted by user".to_string(),
+                    },
+                    status_text: "ABORTED • WAITING FOR PROMPT".to_string(),
+                });
+            }
+            TurnTermination::PermissionDenied => {
+                return Some(ParsedTranscriptStep {
+                    step_index,
+                    state: AgentState::WaitingForInput {
+                        prompt_preview: "Permission denied - ready for next instruction".to_string(),
+                    },
+                    status_text: "PERMISSION DENIED • WAITING FOR PROMPT".to_string(),
+                });
+            }
+            TurnTermination::Normal => {}
         }
 
         // 3. Multi-step and active tool calls
@@ -221,28 +296,12 @@ impl AntigravityParser {
                     .unwrap_or(status);
                 let tool_status_upper = tool_status.to_ascii_uppercase();
 
-                // Deterministic check: WaitingForApproval vs RunningTool
-                let is_approval_required = tool_status_upper == "WAITING_FOR_APPROVAL"
-                    || tool_status_upper == "APPROVAL_REQUIRED"
-                    || tool_status_upper == "WAITING_APPROVAL"
-                    || tool_status_upper == "PENDING_APPROVAL"
-                    || tool_status_upper == "CONFIRMATION_REQUIRED"
-                    || active_tool
-                        .get("requires_approval")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    || active_tool
-                        .get("approval_required")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    || tool_name == "ask_question"
-                    || tool_name == "ask_user"
-                    || tool_name == "confirm"
-                    || tool_name == "request_permission"
-                    || tool_name == "confirmation"
-                    || tool_action.to_ascii_lowercase().contains("permission")
-                    || tool_action.to_ascii_lowercase().contains("approval")
-                    || tool_action.to_ascii_lowercase().contains("confirmation");
+                let tool_mode = ToolMode::from_tool_metadata(
+                    &tool_status_upper,
+                    tool_name,
+                    tool_action,
+                    active_tool,
+                );
 
                 let step_progress_str = if total_tools > 1 {
                     format!(" [{}/{}]", active_idx + 1, total_tools)
@@ -250,8 +309,8 @@ impl AntigravityParser {
                     String::new()
                 };
 
-                let (state, status_text) = if is_approval_required {
-                    (
+                let (state, status_text) = match tool_mode {
+                    ToolMode::RequiresApproval => (
                         AgentState::WaitingForApproval {
                             name: tool_name.to_string(),
                             summary: tool_summary.to_string(),
@@ -267,9 +326,8 @@ impl AntigravityParser {
                                 step_progress_str, tool_summary, tool_action
                             )
                         },
-                    )
-                } else {
-                    (
+                    ),
+                    ToolMode::Autonomous => (
                         AgentState::RunningTool {
                             name: tool_name.to_string(),
                             summary: tool_summary.to_string(),
@@ -285,7 +343,7 @@ impl AntigravityParser {
                                 step_progress_str, tool_summary, tool_action
                             )
                         },
-                    )
+                    ),
                 };
 
                 return Some(ParsedTranscriptStep {
@@ -397,6 +455,31 @@ pub struct ParsedClaudeStep {
     pub prompt_preview: Option<String>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ClaudeTermination {
+    Aborted,
+    EndTurn,
+    ToolUse,
+    Other,
+}
+
+impl ClaudeTermination {
+    fn from_stop_reason(stop_reason: &str) -> Self {
+        if matches!(
+            stop_reason.to_ascii_uppercase().as_str(),
+            "CANCELLED" | "CANCELED" | "INTERRUPTED" | "ABORTED"
+        ) {
+            Self::Aborted
+        } else if stop_reason.eq_ignore_ascii_case("end_turn") {
+            Self::EndTurn
+        } else if stop_reason.eq_ignore_ascii_case("tool_use") {
+            Self::ToolUse
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// Parser and state machine for Claude Code Anthropic Messages JSON transcripts.
 pub struct ClaudeParser;
 
@@ -428,12 +511,8 @@ impl ClaudeParser {
 
         // 1. Assistant message
         if role == "assistant" {
-            let stop_upper = stop_reason.to_ascii_uppercase();
-            if stop_upper == "CANCELLED"
-                || stop_upper == "CANCELED"
-                || stop_upper == "INTERRUPTED"
-                || stop_upper == "ABORTED"
-            {
+            let termination = ClaudeTermination::from_stop_reason(stop_reason);
+            if termination == ClaudeTermination::Aborted {
                 return Some(ParsedClaudeStep {
                     session_id,
                     cwd,
@@ -486,10 +565,11 @@ impl ClaudeParser {
                         tool_name.to_string()
                     };
 
-                    let is_approval_tool = tool_name == "AskFollowupQuestion"
-                        || tool_name == "ExitPlanMode"
-                        || tool_name.to_ascii_lowercase().contains("confirm")
-                        || tool_name.to_ascii_lowercase().contains("permission");
+                    let is_approval_tool = matches!(tool_name, "AskFollowupQuestion" | "ExitPlanMode")
+                        || {
+                            let name_lower = tool_name.to_ascii_lowercase();
+                            name_lower.contains("confirm") || name_lower.contains("permission")
+                        };
 
                     let step_progress_str = if total_tools > 1 {
                         format!(" [1/{}]", total_tools)

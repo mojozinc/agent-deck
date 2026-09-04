@@ -102,24 +102,44 @@ pub fn compute_band_targets(session: &ActiveSession, pulse_phase: f32) -> [f32; 
         0.0
     };
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum StatusCategory {
+    ActiveIO,
+    AlertOrError,
+    Normal,
+}
+
+impl StatusCategory {
+    fn from_status_text(status_text: &str) -> Self {
+        let lower = status_text.to_ascii_lowercase();
+
+        const ALERT_KEYWORDS: &[&str] = &["error", "failed", "denied", "abort"];
+        if ALERT_KEYWORDS.iter().any(|&k| lower.contains(k)) {
+            return Self::AlertOrError;
+        }
+
+        const IO_KEYWORDS: &[&str] = &["tool", "bash", "exec", "edit", "read"];
+        if IO_KEYWORDS.iter().any(|&k| lower.contains(k)) {
+            return Self::ActiveIO;
+        }
+
+        Self::Normal
+    }
+}
+
+    let status_cat = StatusCategory::from_status_text(&session.status_text);
+
     // Band 1: Tool Calls (Low-Mid)
     targets[1] = match &session.state {
         AgentState::RunningTool { .. } => {
             (0.85 + 0.15 * (pulse_phase * 3.5).sin().abs()).clamp(0.0, 1.0)
         }
-        AgentState::Thinking => {
-            let text_lower = session.status_text.to_ascii_lowercase();
-            if text_lower.contains("tool")
-                || text_lower.contains("bash")
-                || text_lower.contains("exec")
-                || text_lower.contains("edit")
-                || text_lower.contains("read")
-            {
+        AgentState::Thinking => match status_cat {
+            StatusCategory::ActiveIO => {
                 (0.60 + 0.20 * (pulse_phase * 2.5).sin().abs()).clamp(0.0, 1.0)
-            } else {
-                (0.15 + 0.10 * (pulse_phase * 2.0).cos().abs()).clamp(0.0, 1.0)
             }
-        }
+            _ => (0.15 + 0.10 * (pulse_phase * 2.0).cos().abs()).clamp(0.0, 1.0),
+        },
         _ => 0.0,
     };
 
@@ -150,17 +170,10 @@ pub fn compute_band_targets(session: &ActiveSession, pulse_phase: f32) -> [f32; 
     } else if matches!(session.state, AgentState::WaitingForApproval { .. }) {
         0.88
     } else {
-        let text_lower = session.status_text.to_ascii_lowercase();
-        if text_lower.contains("error")
-            || text_lower.contains("failed")
-            || text_lower.contains("denied")
-            || text_lower.contains("abort")
-        {
-            0.92
-        } else if session.attention.is_unacknowledged {
-            0.70
-        } else {
-            0.0
+        match status_cat {
+            StatusCategory::AlertOrError => 0.92,
+            _ if session.attention.is_unacknowledged => 0.70,
+            _ => 0.0,
         }
     };
 
