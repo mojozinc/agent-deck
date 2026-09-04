@@ -5,6 +5,13 @@
 # Configurable WSL Distro (Defaults to $WSL_DISTRO_NAME, or clibox if unset)
 WSL_DISTRO ?= $(or $(WSL_DISTRO_NAME), clibox)
 
+# Detect if make is executed natively in Linux or from Windows
+ifeq ($(shell uname -s 2>/dev/null),Linux)
+    WSL_EXEC := bash -c
+else
+    WSL_EXEC := wsl -d $(WSL_DISTRO) bash -c
+endif
+
 .PHONY: help build run-win dev-wsl install-wsl build-wsl clean
 
 help:
@@ -26,13 +33,13 @@ run-win:
 	cargo run -p agent-deck-ui --release
 
 dev-wsl:
-	wsl -d $(WSL_DISTRO) bash -c 'export PATH="$$HOME/.cargo/bin:$$PATH"; cd /mnt/c/Users/schordinger/workbench/agent-deck && CARGO_TARGET_DIR=/tmp/target-agent-deck cargo run -p agent-deck-daemon'
+	$(WSL_EXEC) 'export PATH="$$HOME/.cargo/bin:$$PATH"; cd /mnt/c/Users/schordinger/workbench/agent-deck && CARGO_TARGET_DIR=/tmp/target-agent-deck cargo run -p agent-deck-daemon'
 
 install-wsl:
-	wsl -d $(WSL_DISTRO) bash -c 'export PATH="$$HOME/.cargo/bin:$$PATH"; cd /mnt/c/Users/schordinger/workbench/agent-deck && cargo install --path crates/agent-deck-daemon --force'
+	$(WSL_EXEC) 'export PATH="$$HOME/.cargo/bin:$$PATH"; cd /mnt/c/Users/schordinger/workbench/agent-deck && cargo install --path crates/agent-deck-daemon --force'
 
 build-wsl:
-	wsl -d $(WSL_DISTRO) bash -c 'export PATH="$$HOME/.cargo/bin:$$PATH"; cd /mnt/c/Users/schordinger/workbench/agent-deck && CARGO_TARGET_DIR=/tmp/target-agent-deck cargo build -p agent-deck-daemon --release'
+	$(WSL_EXEC) 'export PATH="$$HOME/.cargo/bin:$$PATH"; cd /mnt/c/Users/schordinger/workbench/agent-deck && CARGO_TARGET_DIR=/tmp/target-agent-deck cargo build -p agent-deck-daemon --release'
 
 clean:
 	cargo clean
