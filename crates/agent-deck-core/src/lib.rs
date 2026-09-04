@@ -10,7 +10,15 @@ pub enum AgentState {
     WaitingForInput { prompt_preview: String },
     Error { message: String },
     Finished,
+    Exited,
 }
+
+pub mod transcript;
+pub use transcript::{
+    extract_claude_title, extract_earliest_markdown_heading, extract_prompt_fallback,
+    extract_workdir_basename, AntigravityParser, ClaudeParser, ParsedClaudeStep,
+    ParsedTranscriptStep, SafeLineReader,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetadata {
@@ -20,6 +28,8 @@ pub struct SessionMetadata {
     pub tmux_pane: Option<String>,
     pub cwd: Option<String>,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
