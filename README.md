@@ -1,4 +1,4 @@
-﻿# 🎛️ Agent Deck (`agent-deck`)
+# 🎛️ Agent Deck (`agent-deck`)
 
 A retro **Winamp-inspired** floating desktop activity deck and multi-stream session monitor for AI coding assistants (**Gemini / Antigravity**, **Claude Code**) running natively on **Windows** and inside **WSL2** (including native **`tmux`** session tracking).
 
@@ -66,6 +66,8 @@ agent-deck/
     ├── agent-deck-ui/       # 🖥️ Windows GUI (Rust + eframe/egui + Stream Adapters)
     └── agent-deck-daemon/   # 🐧 WSL2 Linux Bridge Daemon (tokio + tmux inspector + transcript watcher)
 ```
+
+> 📖 **Deep Dive**: For an in-depth breakdown of daemon collection, kernel liveness detection, immediate-mode UI wiring, and the end-to-end data pipeline, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 

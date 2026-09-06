@@ -1,7 +1,9 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = [
     "crates/agent-deck-core",
     "crates/agent-deck-ui",
     "crates/agent-deck-daemon",
+    "tests",
 ]
+

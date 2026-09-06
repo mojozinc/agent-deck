@@ -1,4 +1,4 @@
-﻿mod tmux;
+mod tmux;
 mod transcript;
 
 use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
@@ -66,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tmux_pane: None,
                         cwd: None,
                         pid: None,
+                        agent_type: Some("Bridge".to_string()),
                     },
                 );
                 if let Ok(json) = serde_json::to_string(&hb_event) {
@@ -100,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tmux_pane: None,
                     cwd: None,
                     pid: None,
+                    agent_type: Some("Bridge".to_string()),
                 },
             );
 
@@ -121,12 +123,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Forward live broadcast stream
-            while let Ok(msg) = rx.recv().await {
-                let payload = format!("{}\n", msg);
-                if let Err(e) = writer.write_all(payload.as_bytes()).await {
-                    eprintln!("Client disconnected: {}", e);
-                    break;
+            // Forward live broadcast stream, handling lagged subscriber error without terminating TCP client stream
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let payload = format!("{}\n", msg);
+                        if let Err(e) = writer.write_all(payload.as_bytes()).await {
+                            eprintln!("Client disconnected: {}", e);
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("Broadcast receiver lagged by {} messages; continuing live stream", skipped);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
                 }
             }
         });

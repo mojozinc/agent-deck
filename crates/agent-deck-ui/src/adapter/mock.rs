@@ -1,4 +1,4 @@
-﻿use super::StreamAdapter;
+use super::StreamAdapter;
 use agent_deck_core::{AgentState, SessionEvent, SessionMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -6,10 +6,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+#[allow(dead_code)]
 pub struct MockAdapter {
     pub enabled: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl MockAdapter {
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
         Self { enabled }
@@ -57,6 +59,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench\\agent-deck".to_string()),
+                                agent_type: None,
                                 pid: Some(12480),
                             },
                         ),
@@ -74,6 +77,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench".to_string()),
+                                agent_type: None,
                                 pid: Some(14200),
                             },
                         ),
@@ -93,6 +97,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:api-server".to_string()),
                                 tmux_pane: Some("%1".to_string()),
                                 cwd: Some("/home/schordinger/workbench/api".to_string()),
+                                agent_type: None,
                                 pid: Some(4092),
                             },
                         ),
@@ -113,6 +118,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:tests".to_string()),
                                 tmux_pane: Some("%0".to_string()),
                                 cwd: Some("/home/schordinger/workbench/worker".to_string()),
+                                agent_type: None,
                                 pid: Some(5120),
                             },
                         ),
@@ -130,6 +136,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("/home/schordinger/workbench/frontend".to_string()),
+                                agent_type: None,
                                 pid: Some(6780),
                             },
                         ),
@@ -149,6 +156,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench\\agent-deck".to_string()),
+                                agent_type: None,
                                 pid: Some(12480),
                             },
                         ),
@@ -168,6 +176,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench".to_string()),
+                                agent_type: None,
                                 pid: Some(14200),
                             },
                         ),
@@ -185,6 +194,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:api-server".to_string()),
                                 tmux_pane: Some("%1".to_string()),
                                 cwd: Some("/home/schordinger/workbench/api".to_string()),
+                                agent_type: None,
                                 pid: Some(4092),
                             },
                         ),
@@ -204,6 +214,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:tests".to_string()),
                                 tmux_pane: Some("%0".to_string()),
                                 cwd: Some("/home/schordinger/workbench/worker".to_string()),
+                                agent_type: None,
                                 pid: Some(5120),
                             },
                         ),
@@ -226,6 +237,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench\\agent-deck".to_string()),
+                                agent_type: None,
                                 pid: Some(12480),
                             },
                         ),
@@ -246,6 +258,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:api-server".to_string()),
                                 tmux_pane: Some("%1".to_string()),
                                 cwd: Some("/home/schordinger/workbench/api".to_string()),
+                                agent_type: None,
                                 pid: Some(4092),
                             },
                         ),
@@ -265,6 +278,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench\\agent-deck".to_string()),
+                                agent_type: None,
                                 pid: Some(12480),
                             },
                         ),
@@ -282,6 +296,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:api-server".to_string()),
                                 tmux_pane: Some("%1".to_string()),
                                 cwd: Some("/home/schordinger/workbench/api".to_string()),
+                                agent_type: None,
                                 pid: Some(4092),
                             },
                         ),
@@ -299,6 +314,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:tests".to_string()),
                                 tmux_pane: Some("%0".to_string()),
                                 cwd: Some("/home/schordinger/workbench/worker".to_string()),
+                                agent_type: None,
                                 pid: Some(5120),
                             },
                         ),
@@ -318,6 +334,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: None,
                                 tmux_pane: None,
                                 cwd: Some("C:\\Users\\schordinger\\workbench\\agent-deck".to_string()),
+                                agent_type: None,
                                 pid: Some(12480),
                             },
                         ),
@@ -335,6 +352,7 @@ impl StreamAdapter for MockAdapter {
                                 tmux_window: Some("0:api-server".to_string()),
                                 tmux_pane: Some("%1".to_string()),
                                 cwd: Some("/home/schordinger/workbench/api".to_string()),
+                                agent_type: None,
                                 pid: Some(4092),
                             },
                         ),
