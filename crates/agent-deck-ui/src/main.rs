@@ -1033,6 +1033,11 @@ impl eframe::App for AgentDeckApp {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
                     if drag_response.double_clicked() {
+                        let restore_size = vec2(
+                            self.stored_deck_size.x.max(480.0 * scale),
+                            self.stored_deck_size.y.max(260.0 * scale),
+                        );
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(restore_size));
                         self.window_mode = DeckWindowMode::FullDeck;
                     }
 
@@ -1124,6 +1129,11 @@ impl eframe::App for AgentDeckApp {
                                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                             }
                             if ui.button(egui::RichText::new("^").size(10.0 * scale)).clicked() {
+                                let restore_size = vec2(
+                                    self.stored_deck_size.x.max(480.0 * scale),
+                                    self.stored_deck_size.y.max(260.0 * scale),
+                                );
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(restore_size));
                                 self.window_mode = DeckWindowMode::FullDeck;
                             }
                             if ui.button(egui::RichText::new("<").size(10.0 * scale)).clicked() {
@@ -1272,6 +1282,11 @@ impl eframe::App for AgentDeckApp {
                                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                                 }
                                 if ui.button(egui::RichText::new("□").size(10.0 * scale)).clicked() {
+                                    let restore_size = vec2(
+                                        self.stored_deck_size.x.max(480.0 * scale),
+                                        self.stored_deck_size.y.max(260.0 * scale),
+                                    );
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(restore_size));
                                     self.window_mode = DeckWindowMode::FullDeck;
                                 }
                                 if ui.button(egui::RichText::new("_").size(10.0 * scale)).clicked() {
@@ -1352,7 +1367,7 @@ impl eframe::App for AgentDeckApp {
                                             let tracker = self.vu_trackers.entry(session.session_id.clone()).or_default();
                                             let current_tracker = *tracker;
 
-                                            let is_editing = row_ctx.editing_session_id.as_deref() == Some(&session.session_id);
+                                             let is_editing = row_ctx.editing_session_id.as_deref() == Some(&session.session_id);
                                             let base_height = if is_editing { 78.0 } else { 54.0 };
                                             let row_height = (base_height * scale).round();
                                             let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
@@ -1380,6 +1395,15 @@ impl eframe::App for AgentDeckApp {
             }
 
             DeckWindowMode::FullDeck => {
+                let current_size = ctx.input(|i| i.screen_rect().size());
+                let target_w = self.stored_deck_size.x.max(480.0 * scale);
+                let target_h = self.stored_deck_size.y.max(260.0 * scale);
+                if current_size.y > 100.0 {
+                    self.stored_deck_size = current_size;
+                } else if current_size.y < target_h - 10.0 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(target_w, target_h)));
+                }
+
                 egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
                     let full_rect = ui.max_rect();
 
@@ -2518,5 +2542,43 @@ mod tests {
         // Progress 1.0 -> Fully expanded deck (667px)
         let w1 = lerp(collapsed_w, expanded_w, 1.0).round();
         assert_eq!(w1, expanded_w.round());
+    }
+
+    #[test]
+    fn test_window_mode_restore_dimensions_calculation() {
+        let scales: [f32; 6] = [0.85, 1.00, 1.15, 1.30, 1.45, 1.60];
+        let default_stored = vec2(580.0, 260.0);
+
+        for &scale in &scales {
+            let restore_size = vec2(
+                default_stored.x.max(480.0 * scale),
+                default_stored.y.max(260.0 * scale),
+            );
+
+            assert!(
+                restore_size.x >= 480.0 * scale,
+                "Restored width must be >= 480.0 * scale"
+            );
+            assert!(
+                restore_size.y >= 260.0 * scale,
+                "Restored height must be >= 260.0 * scale (was {}, expected >= {})",
+                restore_size.y,
+                260.0 * scale
+            );
+        }
+
+        // Even if stored height was somehow shrunk to 36px during windowshade
+        let corrupted_stored = vec2(300.0, 36.0);
+        for &scale in &scales {
+            let restore_size = vec2(
+                corrupted_stored.x.max(480.0 * scale),
+                corrupted_stored.y.max(260.0 * scale),
+            );
+
+            assert!(
+                restore_size.y >= 260.0 * scale,
+                "Restored height must guard against corrupted height"
+            );
+        }
     }
 }
