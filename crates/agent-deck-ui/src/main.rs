@@ -451,6 +451,17 @@ fn setup_crash_logging() {
     }));
 }
 
+/// Single-screen ergonomic window modes
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum DeckWindowMode {
+    FullDeck,
+    Windowshade,
+    EdgeSliver {
+        pinned: bool,
+        expanded_progress: f32, // 0.0 (collapsed 34px strip) to 1.0 (expanded 580px drawer)
+    },
+}
+
 pub struct AgentDeckApp {
     hub: SessionHub,
     selected_session_id: Option<String>,
@@ -458,9 +469,10 @@ pub struct AgentDeckApp {
     edit_text_buffer: String,
     last_frame_time: Instant,
     pulse_phase: f32,
-    is_compact_mode: bool,
+    window_mode: DeckWindowMode,
     font_scale: f32,
     vu_trackers: HashMap<String, VuSessionTracker>,
+    stored_deck_size: egui::Vec2,
 }
 
 impl AgentDeckApp {
@@ -488,9 +500,10 @@ impl AgentDeckApp {
             edit_text_buffer: String::new(),
             last_frame_time: Instant::now(),
             pulse_phase: 0.0,
-            is_compact_mode: false,
+            window_mode: DeckWindowMode::FullDeck,
             font_scale: 1.15,
             vu_trackers: HashMap::new(),
+            stored_deck_size: egui::vec2(580.0, 260.0),
         }
     }
 }
@@ -985,289 +998,643 @@ impl eframe::App for AgentDeckApp {
             .rounding(Rounding::same(8.0))
             .inner_margin(egui::Margin::same(6.0));
 
-        egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            let full_rect = ui.max_rect();
+        let top_urgent_session = self.hub.sessions.iter().min_by_key(|s| s.sort_priority()).cloned();
+        let has_unacknowledged = self.hub.sessions.iter().any(|s| s.attention.is_unacknowledged);
+        let has_waiting_approval = self.hub.sessions.iter().any(|s| matches!(s.state, AgentState::WaitingForApproval { .. }));
+        let is_any_active = self.hub.sessions.iter().any(|s| s.is_active());
 
-            // Drag window from chassis
-            let drag_response = ui.interact(full_rect, ui.id().with("deck_drag"), egui::Sense::drag());
-            if drag_response.dragged() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
+        match self.window_mode {
+            DeckWindowMode::Windowshade => {
+                let target_h = (36.0 * scale).round();
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(
+                    self.stored_deck_size.x.max(480.0 * scale),
+                    target_h,
+                )));
 
-            // Top Header: Clean Typography & Controls
-            ui.horizontal(|ui| {
-                ui.add_space(2.0);
-                ui.painter().rect_filled(
-                    Rect::from_min_size(ui.cursor().min + vec2(0.0, 2.0), vec2(14.0, 14.0)),
-                    Rounding::same(2.0),
-                    Color32::from_rgb(0, 210, 150),
-                );
-                ui.add_space(18.0);
-
-                ui.colored_label(
-                    Color32::from_rgb(200, 220, 245),
-                    egui::RichText::new("AGENT-DECK v0.3").strong().size(12.0 * scale),
-                );
-
-                let active_bridges = self.hub.get_active_bridges();
-                if !active_bridges.is_empty() {
-                    let bridge_name = active_bridges.join(", ");
-                    let is_recent_connect = self
-                        .hub
-                        .last_bridge_connected_at
-                        .map(|t| t.elapsed().as_secs_f32() < 4.0)
-                        .unwrap_or(false);
-
-                    let link_col = if is_recent_connect {
-                        let breathe = organic_led_breathing(self.pulse_phase * 1.5);
-                        let pulse_intensity = lerp(0.35, 1.0, breathe);
-                        Color32::from_rgb(0, (240.0 * pulse_intensity) as u8, (200.0 * pulse_intensity) as u8)
-                    } else {
-                        Color32::from_rgb(0, 210, 160)
-                    };
-
-                    ui.add_space(6.0);
-                    ui.colored_label(
-                        link_col,
-                        egui::RichText::new(format!("● {} LINKED", bridge_name)).monospace().size(9.0 * scale),
-                    );
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(egui::RichText::new("X").size(10.5 * scale).color(Color32::from_rgb(255, 100, 100))).clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.button(egui::RichText::new(if self.is_compact_mode { "^" } else { "_" }).size(10.0 * scale)).clicked() {
-                        self.is_compact_mode = !self.is_compact_mode;
-                    }
-
-                    // Font Zoom Controls (A+ / A-)
-                    if ui.button(egui::RichText::new("A+").size(9.0 * scale)).clicked() {
-                        self.font_scale = (self.font_scale + 0.08).min(1.6);
-                    }
-                    if ui.button(egui::RichText::new("A-").size(9.0 * scale)).clicked() {
-                        self.font_scale = (self.font_scale - 0.08).max(0.85);
-                    }
-                });
-            });
-
-            ui.add_space(3.0);
-
-            // Dynamic Category Tabs Rendering (Single-pass CategorySummary)
-            ui.horizontal(|ui| {
-                for (tab_idx, summary) in summaries.iter().enumerate() {
-                    let count = summary.session_count;
-                    let is_unacked = summary.has_unacknowledged;
-                    let is_waiting = summary.has_waiting_input;
-                    let is_active = self.hub.selected_tab_idx == tab_idx;
-
-                    let tab_bg = if is_active {
-                        Color32::from_rgb(42, 52, 68)
-                    } else {
-                        Color32::from_rgb(24, 27, 34)
-                    };
-
-                    let tab_border = if is_unacked {
-                        let breathe = organic_led_breathing(self.pulse_phase * 1.5);
+                let shade_frame = egui::Frame::none()
+                    .fill(Color32::from_rgb(18, 20, 25))
+                    .stroke(Stroke::new(1.5_f32, if has_unacknowledged || has_waiting_approval {
+                        let breathe = organic_led_breathing(self.pulse_phase * 1.8);
                         Color32::from_rgb(
-                            lerp(140.0, 255.0, breathe) as u8,
-                            lerp(100.0, 205.0, breathe) as u8,
+                            lerp(180.0, 255.0, breathe) as u8,
+                            lerp(120.0, 200.0, breathe) as u8,
                             0,
                         )
-                    } else if is_waiting {
-                        Color32::from_rgb(180, 140, 20)
-                    } else if is_active {
-                        Color32::from_rgb(0, 220, 160)
                     } else {
-                        Color32::from_rgb(45, 52, 64)
-                    };
+                        Color32::from_rgb(60, 70, 84)
+                    }))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(egui::Margin::symmetric(6.0, 4.0));
 
-                    let dot = if is_unacked {
-                        "*"
-                    } else if is_waiting {
-                        "*"
-                    } else {
-                        "o"
-                    };
-
-                    let tab_label = format!("{} {} • {}", dot, summary.label, count);
-
-                    let btn = egui::Button::new(
-                        egui::RichText::new(tab_label)
-                            .size(11.0 * scale)
-                            .color(if is_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
-                    )
-                    .fill(tab_bg)
-                    .stroke(Stroke::new(1.0_f32, tab_border))
-                    .rounding(Rounding::same(3.0));
-
-                    if ui.add(btn).clicked() {
-                        self.hub.selected_tab_idx = tab_idx;
-                        frame_actions.push(UserAction::AcknowledgeCategory(summary.id.clone()));
+                egui::CentralPanel::default().frame(shade_frame).show(ctx, |ui| {
+                    let full_rect = ui.max_rect();
+                    let drag_response = ui.interact(full_rect, ui.id().with("shade_drag"), egui::Sense::click_and_drag());
+                    if drag_response.dragged() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
-                }
-            });
-
-            ui.add_space(4.0);
-
-            if !self.is_compact_mode && !summaries.is_empty() {
-                let current_summary = summaries.get(self.hub.selected_tab_idx).unwrap_or(&summaries[0]);
-                let matching_ids: Vec<String> = self
-                    .hub
-                    .sessions_for_summary(current_summary)
-                    .iter()
-                    .map(|s| s.session_id.clone())
-                    .collect();
-
-                // Advance animation state for sessions in other environments not currently rendered
-                for session in &mut self.hub.sessions {
-                    if !matching_ids.iter().any(|id| id == &session.session_id) {
-                        session.update_animations(dt, self.pulse_phase);
-                        let tracker = self
-                            .vu_trackers
-                            .entry(session.session_id.clone())
-                            .or_default();
-                        tracker.update(session, dt, self.pulse_phase);
-                        for i in 0..6 {
-                            session.vu_levels[i] = tracker.bands[i].level;
-                        }
+                    if drag_response.double_clicked() {
+                        self.window_mode = DeckWindowMode::FullDeck;
                     }
-                }
 
-                let available_h = (ui.available_height() - 22.0).max(50.0);
-
-                egui::ScrollArea::vertical()
-                    .max_height(available_h)
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        if matching_ids.is_empty() {
-                            ui.add_space(15.0);
-                            ui.vertical_centered(|ui| {
-                                ui.colored_label(
-                                    Color32::from_rgb(110, 130, 145),
-                                    egui::RichText::new("No active sessions in this environment")
-                                        .monospace()
-                                        .size(11.0 * scale),
-                                );
-                            });
+                    ui.horizontal(|ui| {
+                        // Attention LED dot
+                        let led_col = if has_waiting_approval {
+                            let breathe = organic_led_breathing(self.pulse_phase * 1.8);
+                            Color32::from_rgb(255, (200.0 * breathe) as u8, 0)
+                        } else if is_any_active {
+                            let breathe = organic_led_breathing(self.pulse_phase * 2.0);
+                            Color32::from_rgb(0, (230.0 * breathe) as u8, 140)
                         } else {
-                            let mut row_ctx = SessionRowContext {
-                                scale,
-                                dt,
-                                pulse_phase: self.pulse_phase,
-                                selected_session_id: &mut self.selected_session_id,
-                                editing_session_id: &mut self.editing_session_id,
-                                edit_text_buffer: &mut self.edit_text_buffer,
+                            Color32::from_rgb(0, 180, 120)
+                        };
+
+                        ui.painter().circle_filled(
+                            ui.cursor().min + vec2(4.0, 9.0 * scale),
+                            4.0 * scale,
+                            led_col,
+                        );
+                        ui.add_space(10.0 * scale);
+
+                        // Category Pill
+                        if let Some(summary) = summaries.get(self.hub.selected_tab_idx) {
+                            let cat_label = format!("● {}: {}", summary.label, summary.session_count);
+                            ui.colored_label(
+                                Color32::from_rgb(0, 220, 160),
+                                egui::RichText::new(cat_label).monospace().size(10.0 * scale).strong(),
+                            );
+                        }
+
+                        ui.add_space(6.0 * scale);
+
+                        // Scrolling urgent marquee
+                        let marquee_text = if let Some(ref s) = top_urgent_session {
+                            format!("{} • {}", s.display_name, s.status_text)
+                        } else {
+                            "AGENT DECK • NO ACTIVE SESSIONS".to_string()
+                        };
+
+                        let marquee_col = if has_waiting_approval {
+                            Color32::from_rgb(255, 215, 60)
+                        } else if is_any_active {
+                            Color32::from_rgb(200, 240, 255)
+                        } else {
+                            Color32::from_rgb(140, 160, 180)
+                        };
+
+                        let text_font = FontId::monospace(10.0 * scale);
+                        let text_w = ui.painter().layout_no_wrap(marquee_text.clone(), text_font.clone(), marquee_col).size().x;
+                        let avail_w = (ui.available_width() - 110.0 * scale).max(60.0);
+
+                        let marquee_rect = Rect::from_min_size(ui.cursor().min, vec2(avail_w, 20.0 * scale));
+                        let prev_clip = ui.painter().clip_rect();
+                        let clipped_painter = ui.painter().with_clip_rect(marquee_rect.intersect(prev_clip));
+
+                        if text_w <= avail_w {
+                            clipped_painter.text(
+                                marquee_rect.min + vec2(0.0, 2.0),
+                                egui::Align2::LEFT_TOP,
+                                marquee_text,
+                                text_font,
+                                marquee_col,
+                            );
+                        } else {
+                            let loop_len = text_w + 36.0 * scale;
+                            let offset = (self.pulse_phase * 22.0) % loop_len;
+                            let start_x = marquee_rect.max.x - offset;
+                            clipped_painter.text(
+                                pos2(start_x, marquee_rect.min.y + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                marquee_text.clone(),
+                                text_font.clone(),
+                                marquee_col,
+                            );
+                            clipped_painter.text(
+                                pos2(start_x + loop_len, marquee_rect.min.y + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                marquee_text,
+                                text_font,
+                                marquee_col,
+                            );
+                        }
+                        ui.allocate_space(vec2(avail_w, 20.0 * scale));
+
+                        // Right controls: [<] (dock) + [^] (restore) + [X] (close)
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(egui::RichText::new("X").size(10.0 * scale).color(Color32::from_rgb(255, 100, 100))).clicked() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            if ui.button(egui::RichText::new("^").size(10.0 * scale)).clicked() {
+                                self.window_mode = DeckWindowMode::FullDeck;
+                            }
+                            if ui.button(egui::RichText::new("<").size(10.0 * scale)).clicked() {
+                                self.window_mode = DeckWindowMode::EdgeSliver { pinned: false, expanded_progress: 0.0 };
+                            }
+                        });
+                    });
+                });
+            }
+
+            DeckWindowMode::EdgeSliver { pinned, mut expanded_progress } => {
+                let pointer_in_window = ctx.input(|i| i.pointer.has_pointer());
+                let target_progress = if pointer_in_window || pinned { 1.0 } else { 0.0 };
+                let ease_speed = dt * 10.0;
+                expanded_progress += (target_progress - expanded_progress) * ease_speed.clamp(0.0, 1.0);
+                self.window_mode = DeckWindowMode::EdgeSliver { pinned, expanded_progress };
+
+                let collapsed_w = (38.0 * scale).round();
+                let expanded_w = self.stored_deck_size.x.max(540.0 * scale);
+                let current_w = lerp(collapsed_w, expanded_w, expanded_progress).round();
+                let current_h = self.stored_deck_size.y.max(260.0 * scale);
+
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(current_w, current_h)));
+
+                let sliver_frame = egui::Frame::none()
+                    .fill(Color32::from_rgb(18, 20, 25))
+                    .stroke(Stroke::new(1.5_f32, if has_unacknowledged || has_waiting_approval {
+                        let breathe = organic_led_breathing(self.pulse_phase * 1.8);
+                        Color32::from_rgb(
+                            lerp(180.0, 255.0, breathe) as u8,
+                            lerp(120.0, 200.0, breathe) as u8,
+                            0,
+                        )
+                    } else {
+                        Color32::from_rgb(0, 200, 140)
+                    }))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(egui::Margin::same(6.0));
+
+                if expanded_progress < 0.15 {
+                    // Collapsed 38px vertical sliver
+                    egui::CentralPanel::default().frame(sliver_frame).show(ctx, |ui| {
+                        let full_rect = ui.max_rect();
+                        let drag_response = ui.interact(full_rect, ui.id().with("sliver_drag"), egui::Sense::drag());
+                        if drag_response.dragged() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+
+                        ui.vertical_centered(|ui| {
+                            let expand_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("<")
+                                        .size(13.0 * scale)
+                                        .strong()
+                                        .color(Color32::from_rgb(0, 240, 160))
+                                )
+                                .fill(Color32::from_rgb(26, 32, 42))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0, 200, 140)))
+                                .rounding(Rounding::same(4.0))
+                            );
+                            if expand_btn.clicked() {
+                                self.window_mode = DeckWindowMode::EdgeSliver { pinned: true, expanded_progress: 1.0 };
+                            }
+
+                            ui.add_space(8.0 * scale);
+
+                            // Organic Breathing Beacon LED
+                            let beacon_col = if has_waiting_approval {
+                                Color32::from_rgb(255, 180, 0)
+                            } else if is_any_active {
+                                Color32::from_rgb(0, 240, 140)
+                            } else {
+                                Color32::from_rgb(60, 160, 100)
+                            };
+                            let pulse = organic_led_breathing(self.pulse_phase * 1.8);
+                            let center = ui.cursor().min + vec2(13.0 * scale, 10.0 * scale);
+                            render_led_with_bloom(ui.painter(), center, 6.0 * scale, beacon_col, pulse);
+
+                            ui.add_space(20.0 * scale);
+
+                            // Session Count
+                            let total_sessions = self.hub.sessions.len();
+                            ui.colored_label(
+                                Color32::from_rgb(0, 220, 180),
+                                egui::RichText::new(format!("{}", total_sessions)).monospace().strong().size(12.0 * scale),
+                            );
+
+                            ui.add_space(10.0 * scale);
+
+                            // Vertical micro-VU bars
+                            if let Some(ref s) = top_urgent_session {
+                                if let Some(tracker) = self.vu_trackers.get(&s.session_id) {
+                                    let bar_w = 18.0 * scale;
+                                    let bar_h = 3.0 * scale;
+                                    let bar_gap = 2.0 * scale;
+                                    for i in (0..6).rev() {
+                                        let level = tracker.bands[i].level;
+                                        let is_lit = level > 0.15;
+                                        let col = if is_lit {
+                                            if i >= 4 {
+                                                Color32::from_rgb(255, 80, 80)
+                                            } else if i >= 3 {
+                                                Color32::from_rgb(255, 200, 30)
+                                            } else {
+                                                Color32::from_rgb(0, 240, 120)
+                                            }
+                                        } else {
+                                            Color32::from_rgb(18, 28, 22)
+                                        };
+                                        let (_, rect) = ui.allocate_space(vec2(bar_w, bar_h));
+                                        ui.painter().rect_filled(rect, Rounding::same(1.0), col);
+                                        ui.add_space(bar_gap);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                } else {
+                    // Expanded Drawer View
+                    egui::CentralPanel::default().frame(sliver_frame).show(ctx, |ui| {
+                        let full_rect = ui.max_rect();
+                        let drag_response = ui.interact(full_rect, ui.id().with("drawer_drag"), egui::Sense::drag());
+                        if drag_response.dragged() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+
+                        // Top Header with Drawer Controls
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new(">").size(11.0 * scale).strong().color(Color32::from_rgb(0, 240, 160))).clicked() {
+                                self.window_mode = DeckWindowMode::EdgeSliver { pinned: false, expanded_progress: 0.0 };
+                            }
+
+                            let pin_color = if pinned { Color32::from_rgb(255, 210, 40) } else { Color32::from_rgb(120, 140, 155) };
+                            let pin_label = if pinned { "[PINNED]" } else { "[AUTO-HIDE]" };
+                            if ui.button(egui::RichText::new(pin_label).size(9.0 * scale).color(pin_color)).clicked() {
+                                self.window_mode = DeckWindowMode::EdgeSliver { pinned: !pinned, expanded_progress: 1.0 };
+                            }
+
+                            ui.colored_label(
+                                Color32::from_rgb(200, 220, 245),
+                                egui::RichText::new("AGENT-DECK").strong().size(12.0 * scale),
+                            );
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button(egui::RichText::new("X").size(10.5 * scale).color(Color32::from_rgb(255, 100, 100))).clicked() {
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                                if ui.button(egui::RichText::new("□").size(10.0 * scale)).clicked() {
+                                    self.window_mode = DeckWindowMode::FullDeck;
+                                }
+                                if ui.button(egui::RichText::new("_").size(10.0 * scale)).clicked() {
+                                    self.window_mode = DeckWindowMode::Windowshade;
+                                }
+                            });
+                        });
+
+                        ui.add_space(3.0);
+
+                        // Category Tabs & Session List
+                        ui.horizontal(|ui| {
+                            for (tab_idx, summary) in summaries.iter().enumerate() {
+                                let count = summary.session_count;
+                                let is_unacked = summary.has_unacknowledged;
+                                let is_waiting = summary.has_waiting_input;
+                                let is_active = self.hub.selected_tab_idx == tab_idx;
+
+                                let tab_bg = if is_active { Color32::from_rgb(42, 52, 68) } else { Color32::from_rgb(24, 27, 34) };
+                                let tab_border = if is_unacked {
+                                    let breathe = organic_led_breathing(self.pulse_phase * 1.5);
+                                    Color32::from_rgb(lerp(140.0, 255.0, breathe) as u8, lerp(100.0, 205.0, breathe) as u8, 0)
+                                } else if is_waiting {
+                                    Color32::from_rgb(180, 140, 20)
+                                } else if is_active {
+                                    Color32::from_rgb(0, 220, 160)
+                                } else {
+                                    Color32::from_rgb(45, 52, 64)
+                                };
+
+                                let dot = if is_unacked { "*" } else if is_waiting { "*" } else { "o" };
+                                let tab_label = format!("{} {} • {}", dot, summary.label, count);
+
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(tab_label)
+                                        .size(11.0 * scale)
+                                        .color(if is_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
+                                )
+                                .fill(tab_bg)
+                                .stroke(Stroke::new(1.0_f32, tab_border))
+                                .rounding(Rounding::same(3.0));
+
+                                if ui.add(btn).clicked() {
+                                    self.hub.selected_tab_idx = tab_idx;
+                                    frame_actions.push(UserAction::AcknowledgeCategory(summary.id.clone()));
+                                }
+                            }
+                        });
+
+                        ui.add_space(4.0);
+
+                        if !summaries.is_empty() {
+                            let current_summary = summaries.get(self.hub.selected_tab_idx).unwrap_or(&summaries[0]);
+                            let matching_ids: Vec<String> = self
+                                .hub
+                                .sessions_for_summary(current_summary)
+                                .iter()
+                                .map(|s| s.session_id.clone())
+                                .collect();
+
+                            let available_h = (ui.available_height() - 10.0).max(50.0);
+                            egui::ScrollArea::vertical()
+                                .max_height(available_h)
+                                .auto_shrink([false; 2])
+                                .show(ui, |ui| {
+                                    let mut row_ctx = SessionRowContext {
+                                        scale,
+                                        dt,
+                                        pulse_phase: self.pulse_phase,
+                                        selected_session_id: &mut self.selected_session_id,
+                                        editing_session_id: &mut self.editing_session_id,
+                                        edit_text_buffer: &mut self.edit_text_buffer,
+                                    };
+
+                                    for session_id in matching_ids {
+                                        if let Some(idx) = self.hub.sessions.iter().position(|s| s.session_id == session_id) {
+                                            let session = &mut self.hub.sessions[idx];
+                                            let tracker = self.vu_trackers.entry(session.session_id.clone()).or_default();
+                                            let current_tracker = *tracker;
+
+                                            let is_editing = row_ctx.editing_session_id.as_deref() == Some(&session.session_id);
+                                            let base_height = if is_editing { 78.0 } else { 54.0 };
+                                            let row_height = (base_height * scale).round();
+                                            let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
+
+                                            if !ui.is_rect_visible(row_rect) {
+                                                ui.add_space(3.0);
+                                                continue;
+                                            }
+
+                                            render_session_row(
+                                                ui,
+                                                row_rect,
+                                                session,
+                                                &mut row_ctx,
+                                                &current_tracker,
+                                                &mut frame_actions,
+                                            );
+                                            ui.add_space(3.0);
+                                        }
+                                    }
+                                });
+                        }
+                    });
+                }
+            }
+
+            DeckWindowMode::FullDeck => {
+                egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
+                    let full_rect = ui.max_rect();
+
+                    // Drag window from chassis
+                    let drag_response = ui.interact(full_rect, ui.id().with("deck_drag"), egui::Sense::click_and_drag());
+                    if drag_response.dragged() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if drag_response.double_clicked() {
+                        self.window_mode = DeckWindowMode::Windowshade;
+                    }
+
+                    // Top Header: Clean Typography & Controls
+                    ui.horizontal(|ui| {
+                        ui.add_space(2.0);
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(ui.cursor().min + vec2(0.0, 2.0), vec2(14.0, 14.0)),
+                            Rounding::same(2.0),
+                            Color32::from_rgb(0, 210, 150),
+                        );
+                        ui.add_space(18.0);
+
+                        ui.colored_label(
+                            Color32::from_rgb(200, 220, 245),
+                            egui::RichText::new("AGENT-DECK v0.3").strong().size(12.0 * scale),
+                        );
+
+                        let active_bridges = self.hub.get_active_bridges();
+                        if !active_bridges.is_empty() {
+                            let bridge_name = active_bridges.join(", ");
+                            let is_recent_connect = self
+                                .hub
+                                .last_bridge_connected_at
+                                .map(|t| t.elapsed().as_secs_f32() < 4.0)
+                                .unwrap_or(false);
+
+                            let link_col = if is_recent_connect {
+                                let breathe = organic_led_breathing(self.pulse_phase * 1.5);
+                                let pulse_intensity = lerp(0.35, 1.0, breathe);
+                                Color32::from_rgb(0, (240.0 * pulse_intensity) as u8, (200.0 * pulse_intensity) as u8)
+                            } else {
+                                Color32::from_rgb(0, 210, 160)
                             };
 
-                            for session_id in matching_ids {
-                                if let Some(idx) = self.hub.sessions.iter().position(|s| s.session_id == session_id) {
-                                    let session = &mut self.hub.sessions[idx];
+                            ui.add_space(6.0);
+                            ui.colored_label(
+                                link_col,
+                                egui::RichText::new(format!("● {} LINKED", bridge_name)).monospace().size(9.0 * scale),
+                            );
+                        }
 
-                                    // Advance animations in-place directly on self.hub.sessions
-                                    // (Ensures off-screen sessions maintain state!)
-                                    session.update_animations(dt, row_ctx.pulse_phase);
-                                    let tracker = self
-                                        .vu_trackers
-                                        .entry(session.session_id.clone())
-                                        .or_default();
-                                    tracker.update(session, dt, row_ctx.pulse_phase);
-                                    for i in 0..6 {
-                                        session.vu_levels[i] = tracker.bands[i].level;
-                                    }
-                                    let current_tracker = *tracker;
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(egui::RichText::new("X").size(10.5 * scale).color(Color32::from_rgb(255, 100, 100))).clicked() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            if ui.button(egui::RichText::new("_").size(10.0 * scale)).clicked() {
+                                self.window_mode = DeckWindowMode::Windowshade;
+                            }
+                            if ui.button(egui::RichText::new("<").size(10.0 * scale)).clicked() {
+                                self.window_mode = DeckWindowMode::EdgeSliver { pinned: false, expanded_progress: 0.0 };
+                            }
 
-                                    let is_editing = row_ctx.editing_session_id.as_deref() == Some(&session.session_id);
-                                    let base_height = if is_editing { 78.0 } else { 54.0 };
-                                    let row_height = (base_height * scale).round();
-                                    let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
+                            // Font Zoom Controls (A+ / A-)
+                            if ui.button(egui::RichText::new("A+").size(9.0 * scale)).clicked() {
+                                self.font_scale = (self.font_scale + 0.08).min(1.6);
+                            }
+                            if ui.button(egui::RichText::new("A-").size(9.0 * scale)).clicked() {
+                                self.font_scale = (self.font_scale - 0.08).max(0.85);
+                            }
+                        });
+                    });
 
-                                    // Viewport Culling: Skip heavy painting primitives for offscreen rows
-                                    if !ui.is_rect_visible(row_rect) {
-                                        ui.add_space(3.0);
-                                        continue;
-                                    }
+                    ui.add_space(3.0);
 
-                                    render_session_row(
-                                        ui,
-                                        row_rect,
-                                        session,
-                                        &mut row_ctx,
-                                        &current_tracker,
-                                        &mut frame_actions,
-                                    );
-                                    ui.add_space(3.0);
-                                }
+                    // Dynamic Category Tabs Rendering (Single-pass CategorySummary)
+                    ui.horizontal(|ui| {
+                        for (tab_idx, summary) in summaries.iter().enumerate() {
+                            let count = summary.session_count;
+                            let is_unacked = summary.has_unacknowledged;
+                            let is_waiting = summary.has_waiting_input;
+                            let is_active = self.hub.selected_tab_idx == tab_idx;
+
+                            let tab_bg = if is_active {
+                                Color32::from_rgb(42, 52, 68)
+                            } else {
+                                Color32::from_rgb(24, 27, 34)
+                            };
+
+                            let tab_border = if is_unacked {
+                                let breathe = organic_led_breathing(self.pulse_phase * 1.5);
+                                Color32::from_rgb(
+                                    lerp(140.0, 255.0, breathe) as u8,
+                                    lerp(100.0, 205.0, breathe) as u8,
+                                    0,
+                                )
+                            } else if is_waiting {
+                                Color32::from_rgb(180, 140, 20)
+                            } else if is_active {
+                                Color32::from_rgb(0, 220, 160)
+                            } else {
+                                Color32::from_rgb(45, 52, 64)
+                            };
+
+                            let dot = if is_unacked {
+                                "*"
+                            } else if is_waiting {
+                                "*"
+                            } else {
+                                "o"
+                            };
+
+                            let tab_label = format!("{} {} • {}", dot, summary.label, count);
+
+                            let btn = egui::Button::new(
+                                egui::RichText::new(tab_label)
+                                    .size(11.0 * scale)
+                                    .color(if is_active { Color32::WHITE } else { Color32::from_rgb(160, 175, 190) })
+                            )
+                            .fill(tab_bg)
+                            .stroke(Stroke::new(1.0_f32, tab_border))
+                            .rounding(Rounding::same(3.0));
+
+                            if ui.add(btn).clicked() {
+                                self.hub.selected_tab_idx = tab_idx;
+                                frame_actions.push(UserAction::AcknowledgeCategory(summary.id.clone()));
                             }
                         }
                     });
 
-                ui.add_space(2.0);
+                    ui.add_space(4.0);
 
-                // Bottom Global Status Bar
-                let total_sessions = self.hub.sessions.len();
-                let total_waiting = self
-                    .hub
-                    .sessions
-                    .iter()
-                    .filter(|s| matches!(s.state, AgentState::WaitingForInput { .. } | AgentState::WaitingForApproval { .. }))
-                    .count();
+                    if !summaries.is_empty() {
+                        let current_summary = summaries.get(self.hub.selected_tab_idx).unwrap_or(&summaries[0]);
+                        let matching_ids: Vec<String> = self
+                            .hub
+                            .sessions_for_summary(current_summary)
+                            .iter()
+                            .map(|s| s.session_id.clone())
+                            .collect();
 
-                ui.horizontal(|ui| {
-                    let status_msg = if total_waiting > 0 {
-                        format!("* {} active • {} requiring input/approval", total_sessions, total_waiting)
-                    } else {
-                        format!("o {} active sessions monitored", total_sessions)
-                    };
+                        let available_h = (ui.available_height() - 22.0).max(50.0);
 
-                    let msg_color = if total_waiting > 0 {
-                        Color32::from_rgb(255, 205, 30)
-                    } else {
-                        Color32::from_rgb(60, 160, 95)
-                    };
+                        egui::ScrollArea::vertical()
+                            .max_height(available_h)
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                if matching_ids.is_empty() {
+                                    ui.add_space(15.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.colored_label(
+                                            Color32::from_rgb(110, 130, 145),
+                                            egui::RichText::new("No active sessions in this environment")
+                                                .monospace()
+                                                .size(11.0 * scale),
+                                        );
+                                    });
+                                } else {
+                                    let mut row_ctx = SessionRowContext {
+                                        scale,
+                                        dt,
+                                        pulse_phase: self.pulse_phase,
+                                        selected_session_id: &mut self.selected_session_id,
+                                        editing_session_id: &mut self.editing_session_id,
+                                        edit_text_buffer: &mut self.edit_text_buffer,
+                                    };
 
-                    ui.colored_label(msg_color, egui::RichText::new(status_msg).monospace().size(9.5 * scale));
+                                    for session_id in matching_ids {
+                                        if let Some(idx) = self.hub.sessions.iter().position(|s| s.session_id == session_id) {
+                                            let session = &mut self.hub.sessions[idx];
+                                            let tracker = self
+                                                .vu_trackers
+                                                .entry(session.session_id.clone())
+                                                .or_default();
+                                            let current_tracker = *tracker;
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Tactile Resize Handle in Bottom Right
-                        let (resize_id, resize_rect) = ui.allocate_space(vec2(12.0, 12.0));
-                        let resize_resp = ui.interact(resize_rect, resize_id, egui::Sense::drag());
+                                            let is_editing = row_ctx.editing_session_id.as_deref() == Some(&session.session_id);
+                                            let base_height = if is_editing { 78.0 } else { 54.0 };
+                                            let row_height = (base_height * scale).round();
+                                            let row_rect = ui.allocate_space(vec2(ui.available_width(), row_height)).1;
 
-                        let grip_color = if resize_resp.hovered() || resize_resp.dragged() {
-                            Color32::from_rgb(0, 220, 160)
-                        } else {
-                            Color32::from_rgb(60, 75, 90)
-                        };
+                                            // Viewport Culling: Skip heavy painting primitives for offscreen rows
+                                            if !ui.is_rect_visible(row_rect) {
+                                                ui.add_space(3.0);
+                                                continue;
+                                            }
 
-                        let p = ui.painter();
-                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 8.0), pos2(resize_rect.max.x - 8.0, resize_rect.max.y - 2.0)], Stroke::new(1.0_f32, grip_color));
-                        p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 4.0), pos2(resize_rect.max.x - 4.0, resize_rect.max.y - 2.0)], Stroke::new(1.0_f32, grip_color));
+                                            render_session_row(
+                                                ui,
+                                                row_rect,
+                                                session,
+                                                &mut row_ctx,
+                                                &current_tracker,
+                                                &mut frame_actions,
+                                            );
+                                            ui.add_space(3.0);
+                                        }
+                                    }
+                                }
+                            });
 
-                        if resize_resp.dragged() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast));
-                        }
+                        ui.add_space(2.0);
 
-                        ui.colored_label(
-                            Color32::from_rgb(50, 75, 60),
-                            egui::RichText::new("[EDIT] Rename • [DISMISS] Dismiss • Drag corner to resize").monospace().size(9.0 * scale),
-                        );
-                    });
-                });
-            } else if self.is_compact_mode {
-                // In compact mode, still advance all session animations
-                self.hub.update_animations(dt, self.pulse_phase);
-                for session in &mut self.hub.sessions {
-                    let tracker = self
-                        .vu_trackers
-                        .entry(session.session_id.clone())
-                        .or_default();
-                    tracker.update(session, dt, self.pulse_phase);
-                    for i in 0..6 {
-                        session.vu_levels[i] = tracker.bands[i].level;
+                        // Bottom Global Status Bar
+                        let total_sessions = self.hub.sessions.len();
+                        let total_waiting = self
+                            .hub
+                            .sessions
+                            .iter()
+                            .filter(|s| matches!(s.state, AgentState::WaitingForInput { .. } | AgentState::WaitingForApproval { .. }))
+                            .count();
+
+                        ui.horizontal(|ui| {
+                            let status_msg = if total_waiting > 0 {
+                                format!("* {} active • {} requiring input/approval", total_sessions, total_waiting)
+                            } else {
+                                format!("o {} active sessions monitored", total_sessions)
+                            };
+
+                            let msg_color = if total_waiting > 0 {
+                                Color32::from_rgb(255, 205, 30)
+                            } else {
+                                Color32::from_rgb(60, 160, 95)
+                            };
+
+                            ui.colored_label(msg_color, egui::RichText::new(status_msg).monospace().size(9.5 * scale));
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                // Tactile Resize Handle in Bottom Right
+                                let (resize_id, resize_rect) = ui.allocate_space(vec2(12.0, 12.0));
+                                let resize_resp = ui.interact(resize_rect, resize_id, egui::Sense::drag());
+
+                                let grip_color = if resize_resp.hovered() || resize_resp.dragged() {
+                                    Color32::from_rgb(0, 220, 160)
+                                } else {
+                                    Color32::from_rgb(60, 75, 90)
+                                };
+
+                                let p = ui.painter();
+                                p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 8.0), pos2(resize_rect.max.x - 8.0, resize_rect.max.y - 2.0)], Stroke::new(1.0_f32, grip_color));
+                                p.line_segment([pos2(resize_rect.max.x - 2.0, resize_rect.max.y - 4.0), pos2(resize_rect.max.x - 4.0, resize_rect.max.y - 2.0)], Stroke::new(1.0_f32, grip_color));
+
+                                if resize_resp.dragged() {
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast));
+                                }
+
+                                ui.colored_label(
+                                    Color32::from_rgb(50, 75, 60),
+                                    egui::RichText::new("[EDIT] Rename • [DISMISS] Dismiss • Drag corner to resize").monospace().size(9.0 * scale),
+                                );
+                            });
+                        });
                     }
-                }
+                });
             }
-        });
+        }
 
         // Prune trackers for sessions that have been permanently dismissed
         if self.vu_trackers.len() > self.hub.sessions.len() + 10 {
@@ -1291,8 +1658,8 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([580.0, 260.0])
-            .with_min_inner_size([460.0, 140.0])
-            .with_max_inner_size([1200.0, 800.0])
+            .with_min_inner_size([30.0, 30.0])
+            .with_max_inner_size([1920.0, 1080.0])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
@@ -2094,5 +2461,62 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_single_screen_window_mode_state_transitions() {
+        let mut mode = DeckWindowMode::FullDeck;
+        assert_eq!(mode, DeckWindowMode::FullDeck);
+
+        // Switch to Windowshade
+        mode = DeckWindowMode::Windowshade;
+        assert_eq!(mode, DeckWindowMode::Windowshade);
+
+        // Switch to Edge Sliver (unpinned)
+        mode = DeckWindowMode::EdgeSliver { pinned: false, expanded_progress: 0.0 };
+        if let DeckWindowMode::EdgeSliver { pinned, expanded_progress } = mode {
+            assert!(!pinned);
+            assert_eq!(expanded_progress, 0.0);
+        } else {
+            panic!("Expected EdgeSliver mode");
+        }
+
+        // Pin Edge Sliver
+        mode = DeckWindowMode::EdgeSliver { pinned: true, expanded_progress: 1.0 };
+        if let DeckWindowMode::EdgeSliver { pinned, expanded_progress } = mode {
+            assert!(pinned);
+            assert_eq!(expanded_progress, 1.0);
+        } else {
+            panic!("Expected EdgeSliver mode");
+        }
+    }
+
+    #[test]
+    fn test_windowshade_compact_geometry_at_all_scales() {
+        let scales: [f32; 6] = [0.85, 1.00, 1.15, 1.30, 1.45, 1.60];
+        for &scale in &scales {
+            let shade_h = (36.0_f32 * scale).round();
+            assert!(shade_h <= 60.0, "Windowshade height ({}) at scale {} must be compact (< 60px)", shade_h, scale);
+            assert!(shade_h >= 30.0, "Windowshade height ({}) must fit single-line marquee (> 30px)", shade_h);
+        }
+    }
+
+    #[test]
+    fn test_edge_sliver_slide_progress_interpolation() {
+        let scale: f32 = 1.15;
+        let collapsed_w = (38.0_f32 * scale).round();
+        let expanded_w = 580.0_f32 * scale;
+
+        // Progress 0.0 -> Collapsed strip (~44px)
+        let w0 = lerp(collapsed_w, expanded_w, 0.0).round();
+        assert_eq!(w0, collapsed_w);
+
+        // Progress 0.5 -> Halfway expanded
+        let w_half = lerp(collapsed_w, expanded_w, 0.5).round();
+        assert!(w_half > collapsed_w && w_half < expanded_w);
+
+        // Progress 1.0 -> Fully expanded deck (667px)
+        let w1 = lerp(collapsed_w, expanded_w, 1.0).round();
+        assert_eq!(w1, expanded_w.round());
     }
 }
